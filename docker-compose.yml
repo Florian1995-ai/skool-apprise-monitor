@@ -1,0 +1,49 @@
+version: "3.8"
+
+services:
+  # Apprise API — push notification gateway (90+ channels)
+  # Docs: https://github.com/caronc/apprise-api
+  apprise:
+    image: caronc/apprise:latest
+    container_name: apprise-api
+    ports:
+      - "8000:8000"
+    environment:
+      # Persistent config storage
+      - APPRISE_STATEFUL_MODE=simple
+    volumes:
+      - apprise-config:/config
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Skool Monitor — runs every 15 minutes via cron
+  # On Coolify: deploy this as a "Scheduled Task" instead
+  monitor:
+    build: .
+    container_name: skool-monitor
+    environment:
+      - SKOOL_AUTH_TOKEN=${SKOOL_AUTH_TOKEN}
+      - SKOOL_CLIENT_ID=${SKOOL_CLIENT_ID:-}
+      - APPRISE_URL=http://apprise:8000
+      - APPRISE_EMAIL_TO=${APPRISE_EMAIL_TO:-florian@florianrolke.com}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - APPRISE_URLS=${APPRISE_URLS:-}
+    volumes:
+      - monitor-state:/app/state
+    depends_on:
+      apprise:
+        condition: service_healthy
+    # For local testing: run once and exit
+    # For production: use Coolify scheduled task or system cron
+    profiles:
+      - manual
+
+volumes:
+  apprise-config:
+  monitor-state:
