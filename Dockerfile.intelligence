@@ -2,7 +2,9 @@ FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
 
 WORKDIR /app
 
-# Install Python dependencies
+# Install cron and Python dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends cron && rm -rf /var/lib/apt/lists/*
+
 COPY requirements-intelligence.txt .
 RUN pip install --no-cache-dir -r requirements-intelligence.txt
 
@@ -19,7 +21,7 @@ RUN chmod 0644 /etc/cron.d/intelligence
 COPY entrypoint-intelligence.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# Volume for persistent state (member tracking, enrichment cache, post watermarks)
+# Volume for persistent state
 VOLUME ["/app/.tmp/intelligence_v2"]
 
 ENTRYPOINT ["/entrypoint.sh"]
