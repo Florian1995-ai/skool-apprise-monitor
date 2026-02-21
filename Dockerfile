@@ -1,18 +1,10 @@
-FROM python:3.11-slim
-
-# Minimal base deps for Playwright to call install-deps
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
 
 WORKDIR /app
 
-# Install Python deps
+# Install Python deps (playwright already installed in base image)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Install Playwright + Chromium (install-deps handles all system packages)
-RUN playwright install chromium --with-deps
 
 ENV STATE_DIR=/app/state
 
