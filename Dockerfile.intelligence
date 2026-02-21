@@ -1,0 +1,25 @@
+FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements-intelligence.txt .
+RUN pip install --no-cache-dir -r requirements-intelligence.txt
+
+# Create state and log directories
+RUN mkdir -p /app/.tmp/intelligence_v2 /var/log
+
+# Copy all execution scripts + tenant configs
+COPY execution/ ./execution/
+
+# Copy cron + entrypoint
+COPY intelligence-crontab /etc/cron.d/intelligence
+RUN chmod 0644 /etc/cron.d/intelligence
+
+COPY entrypoint-intelligence.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Volume for persistent state (member tracking, enrichment cache, post watermarks)
+VOLUME ["/app/.tmp/intelligence_v2"]
+
+ENTRYPOINT ["/entrypoint.sh"]
