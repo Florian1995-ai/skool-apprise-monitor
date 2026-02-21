@@ -870,6 +870,12 @@ async def run_daemon(community: str, interval: int = 180, headless: bool = True,
     session = BrowserSession(headless=headless)
     cycle = 0
 
+    # Auto-init: if no state file exists, first cycle initializes state
+    member_state_path = STATE_DIR / f"members_{community}.json"
+    needs_init = not member_state_path.exists()
+    if needs_init:
+        print("  No state file found — first cycle will initialize (no notifications).")
+
     try:
         await session.start()
 
@@ -886,7 +892,11 @@ async def run_daemon(community: str, interval: int = 180, headless: bool = True,
                     members_only=members_only,
                     posts_only=posts_only,
                     session=session,
+                    init=needs_init,
                 )
+                if needs_init:
+                    needs_init = False
+                    print("  State initialized. Next cycles will detect new members.")
             except Exception as e:
                 print(f"  CYCLE ERROR: {e}")
                 # Try to recover by restarting browser
