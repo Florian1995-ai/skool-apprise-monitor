@@ -67,10 +67,12 @@ def get_state_dir(tenant_slug: str) -> Path:
 # Job A: Member Delta
 # ============================================================================
 
-async def run_job_a_members(config: dict, state_dir: Path, headless: bool = True, dry_run: bool = False) -> dict:
+async def run_job_a_members(config: dict, state_dir: Path, headless: bool = True,
+                           dry_run: bool = False, init_mode: bool = False) -> dict:
     """
     Job A: Member Delta → Enrich → Score → Alert → Draft
 
+    If init_mode=True, only scrapes + saves state (no enrich/score/alert).
     Returns summary dict with counts and qualified member list.
     """
     tenant_id = config["tenant_id"]
@@ -78,7 +80,7 @@ async def run_job_a_members(config: dict, state_dir: Path, headless: bool = True
     icp_threshold = config["scoring"]["heroes_arc_icp"]["threshold_alert"]
 
     print(f"\n{'='*60}")
-    print(f"JOB A: MEMBER DELTA — {tenant_id}")
+    print(f"JOB A: MEMBER DELTA — {tenant_id}" + (" [INIT MODE]" if init_mode else ""))
     print(f"{'='*60}")
 
     # Step 1: Member delta
@@ -91,6 +93,17 @@ async def run_job_a_members(config: dict, state_dir: Path, headless: bool = True
     )
 
     all_flagged = new_members + churn_risk
+
+    # In init mode, just save state and return counts — no enrichment or alerting
+    if init_mode:
+        print(f"\n[INIT MODE] State saved. {len(new_members)} new, {len(churn_risk)} churn-risk.")
+        print(f"  Skipping enrichment, scoring, and alerting.")
+        return {
+            "new_count": len(new_members), "churn_count": len(churn_risk),
+            "qualified_count": 0, "new_qualified": 0, "churn_qualified": 0,
+            "qualified": [], "mode": "init",
+        }
+
     if not all_flagged:
         print("\n  No new members or churn-risk members this run.")
         return {"new_count": 0, "churn_count": 0, "qualified_count": 0, "qualified": []}
@@ -252,15 +265,18 @@ async def main():
                         help="Compute everything but don't save state or send alerts")
     parser.add_argument("--visible", action="store_true",
                         help="Show Playwright browser window (useful for debugging)")
+    parser.add_argument("--init", action="store_true",
+                        help="Initialize state only — scrape + save baseline, no alerts")
     args = parser.parse_args()
 
     from dotenv import load_dotenv
     load_dotenv(BASE_DIR / ".env")
 
+    mode_label = "INIT (baseline)" if args.init else ("DRY RUN" if args.dry_run else "LIVE")
     print(f"\nSkool Intelligence Orchestrator v2")
     print(f"Tenant: {args.tenant}")
     print(f"Job:    {args.job}")
-    print(f"Mode:   {'DRY RUN' if args.dry_run else 'LIVE'}")
+    print(f"Mode:   {mode_label}")
     print(f"Time:   {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 
     # Load config
@@ -281,17 +297,37 @@ async def main():
             state_dir=state_dir,
             headless=headless,
             dry_run=args.dry_run,
+            init_mode=args.init,
         )
 
-    if args.job in ("posts", "both"):
+    if args.job in ("posts", "both") and not args.init:
         job_b_result = await run_job_b_posts(
             config=config,
             state_dir=state_dir,
             dry_run=args.dry_run,
         )
+    elif args.init and args.job in ("posts", "both"):
+        print(f"\n[INIT MODE] Skipping post monitor — init only saves member state.")
 
     elapsed = time.time() - start_time
     print_run_summary(args.tenant, job_a_result, job_b_result, elapsed)
+
+    # Save run log for daily digest
+    run_log = {
+        "run_id": datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S"),
+        "tenant": args.tenant,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "elapsed_seconds": round(elapsed, 1),
+        "mode": "init" if args.init else ("dry_run" if args.dry_run else "live"),
+        "job_a": job_a_result or {},
+        "job_b": job_b_result or {},
+    }
+    run_log_dir = state_dir / "run_logs"
+    run_log_dir.mkdir(parents=True, exist_ok=True)
+    run_log_path = run_log_dir / f"{run_log['run_id']}.json"
+    with open(run_log_path, "w", encoding="utf-8") as f:
+        json.dump(run_log, f, indent=2, default=str)
+    print(f"\nRun log saved: {run_log_path.name}")
 
 
 if __name__ == "__main__":

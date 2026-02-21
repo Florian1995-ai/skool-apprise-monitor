@@ -100,8 +100,6 @@ def draft_message(member: dict, signal_type: str, relevant_posts: list, config: 
         import os
         from dotenv import load_dotenv
         load_dotenv(BASE_DIR / ".env")
-        import anthropic
-
         name = member.get("name", "").split()[0] if member.get("name") else "there"
         bio = member.get("bio", "")
         enrichment = member.get("enrichment", {})
@@ -149,15 +147,20 @@ Member context:
 Write ONLY the DM text. No subject line. No formatting. Just the message itself.
 3-4 sentences max. Reference 1 specific detail from their profile. End with a genuine question."""
 
-        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-        model = config.get("messaging", {}).get("model", "claude-haiku-4-5-20251001")
+        # Use OpenRouter (openai-compatible) — no need for anthropic package
+        import openai
+        oai = openai.OpenAI(
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+            base_url="https://openrouter.ai/api/v1",
+        )
+        model = config.get("messaging", {}).get("model", "anthropic/claude-haiku-4.5")
 
-        response = client.messages.create(
+        response = oai.chat.completions.create(
             model=model,
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.content[0].text.strip()
+        return response.choices[0].message.content.strip()
 
     except Exception as e:
         print(f"  Draft error: {e}")

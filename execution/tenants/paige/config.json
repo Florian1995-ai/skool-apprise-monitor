@@ -1,7 +1,7 @@
 {
-  "tenant_id": "aiautomationsbyjack",
-  "community_slug": "aiautomationsbyjack",
-  "display_name": "AI Automations by Jack",
+  "tenant_id": "paige",
+  "community_slug": "TODO_paige_skool_slug",
+  "display_name": "Paige (TODO: fill in display name)",
   "schedule": "08:00/14:00/20:00 EST",
 
   "members": {
@@ -33,7 +33,8 @@
       "booked", "sold", "new client", "new contract", "recurring", "MRR", "ARR"
     ],
     "antigravity_keywords": [
-      "anti-gravity", "antigravity", "anti gravity", "florian", "florianrolke"
+      "anti-gravity", "antigravity", "anti gravity", "florian", "florianrolke",
+      "paige", "TODO_add_paige_specific_keywords"
     ]
   },
 
@@ -49,19 +50,12 @@
       "desktop_push": "ntfy://ntfy.sh/skool-icp-cb311748",
       "include_draft": true
     },
-    "adam": {
-      "email": "adam@aiautomationsbyjack.com",
+    "paige": {
+      "email": "TODO_paige_email@example.com",
       "receives": [
         "new_qualified_member",
         "churn_qualified_member",
         "monetary_win"
-      ],
-      "include_draft": false
-    },
-    "lanie": {
-      "email": "lanie@aiautomationsbyjack.com",
-      "receives": [
-        "churn_qualified_member"
       ],
       "include_draft": false
     }
@@ -70,7 +64,7 @@
   "messaging": {
     "mode": "draft_email_to_florian",
     "model": "anthropic/claude-haiku-4.5",
-    "tone_template": "You are Florian, a sharp AI operator and community builder. Write a short (3-4 sentence) first-touch DM to a Skool member. Tone: direct, warm, curious — never salesy. Reference 1 specific detail from their profile. End with a simple open question about their business. No emojis. No 'I hope this message finds you well'. Get straight to the point.",
+    "tone_template": "TODO: Define Paige's tone for outreach DMs. 3-4 sentences. No emojis.",
     "include_post_matches": true,
     "max_post_matches": 2
   },
@@ -81,7 +75,7 @@
 
   "vectorization": {
     "enabled": true,
-    "supabase_table": "skool_posts_jack",
+    "supabase_table": "skool_posts_paige",
     "embedding_model": "text-embedding-3-small",
     "embedding_dims": 1536
   }
