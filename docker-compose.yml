@@ -34,6 +34,9 @@ services:
       - SMTP_PASS=${SMTP_PASS:-}
       - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
       - APPRISE_URLS=${APPRISE_URLS:-}
+      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY:-}
+      - TAVILY_API_KEY_5=${TAVILY_API_KEY_5:-}
+      - TAVILY_API_KEY_6=${TAVILY_API_KEY_6:-}
     volumes:
       - monitor-state:/app/state
     depends_on:

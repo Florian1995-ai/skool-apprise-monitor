@@ -7,12 +7,15 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 ENV STATE_DIR=/app/state
+ENV EVENTS_DIR=/app/state/events
 
-# State directory (mount as volume for persistence)
-RUN mkdir -p /app/state
+# State + events directories (mount as volume for persistence)
+RUN mkdir -p /app/state/events
 
-# Copy monitor script
+# Copy monitor + digest scripts
 COPY skool_apprise_monitor.py .
+COPY skool_daily_digest_v3.py .
 
-# Default: daemon mode — persistent loop, members only, every 3 minutes
-CMD ["python", "skool_apprise_monitor.py", "--daemon", "--interval", "180", "--members-only"]
+# Daemon mode: members + cancellations + posts every 3 minutes
+# Daily digest triggers at 9:30pm EST (02:30 UTC) automatically
+CMD ["python", "skool_apprise_monitor.py", "--daemon", "--interval", "180"]
