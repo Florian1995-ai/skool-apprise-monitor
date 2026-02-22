@@ -1071,47 +1071,69 @@ async def scrape_posts_with_page(page, community: str, max_pages: int = 2) -> li
 
         if next_data:
             page_props = next_data.get('props', {}).get('pageProps', {}) or {}
+
+            # Skool uses postTrees[].post with metadata for content
+            post_trees = page_props.get('postTrees', []) or []
             post_list = page_props.get('posts', []) or []
 
-            if not post_list:
-                dehydrated = page_props.get('dehydratedState', {})
-                if dehydrated:
-                    for q in dehydrated.get('queries', []):
-                        data = q.get('state', {}).get('data', {})
-                        if isinstance(data, dict):
-                            items = data.get('items', []) or data.get('posts', []) or data.get('data', [])
-                            if items and isinstance(items, list) and len(items) > 0:
-                                first = items[0]
-                                if isinstance(first, dict) and ('title' in first or 'content' in first):
-                                    post_list = items
-                                    break
-                        elif isinstance(data, list) and len(data) > 0:
-                            first = data[0]
-                            if isinstance(first, dict) and ('title' in first or 'content' in first):
-                                post_list = data
-                                break
-
-            for post in post_list:
-                post_id = post.get('id') or post.get('postId')
-                if post_id and post_id not in seen_ids:
+            if post_trees:
+                # Current Skool format: postTrees[].post.metadata.{title,content,upvotes,comments}
+                for tree in post_trees:
+                    raw = tree.get('post', {}) or {}
+                    post_id = raw.get('id', '')
+                    if not post_id or post_id in seen_ids:
+                        continue
                     seen_ids.add(post_id)
-                    author = post.get('author', {}) or {}
-                    author_name = post.get('authorName') or author.get('name', '')
+
+                    meta = raw.get('metadata', {}) or {}
+                    user = raw.get('user', {}) or {}
+                    slug = raw.get('name', '')
+                    first_name = user.get('firstName', '')
+                    last_name = user.get('lastName', '')
+                    author_name = f"{first_name} {last_name}".strip() or user.get('name', '')
+
                     posts.append({
                         'id': post_id,
-                        'title': post.get('title', ''),
-                        'content': post.get('content', '') or post.get('body', ''),
+                        'title': meta.get('title', '') or '',
+                        'content': meta.get('content', '') or '',
                         'authorName': author_name,
-                        'author': author,
-                        'url': post.get('url') or post.get('postUrl') or f"https://www.skool.com/{community}/{post_id}",
-                        'postUrl': post.get('url') or post.get('postUrl') or f"https://www.skool.com/{community}/{post_id}",
-                        'likesCount': post.get('likesCount', 0),
-                        'commentsCount': post.get('commentsCount', 0),
-                        'createdAt': post.get('createdAt', ''),
-                        'categoryName': post.get('categoryName', ''),
+                        'author': {'name': user.get('name', ''), 'username': user.get('name', '')},
+                        'url': f"https://www.skool.com/{community}/{slug}" if slug else f"https://www.skool.com/{community}/{post_id}",
+                        'postUrl': f"https://www.skool.com/{community}/{slug}" if slug else f"https://www.skool.com/{community}/{post_id}",
+                        'likesCount': meta.get('upvotes', 0) or 0,
+                        'commentsCount': meta.get('comments', 0) or 0,
+                        'createdAt': raw.get('createdAt', ''),
+                        'categoryName': '',  # labels ID needs separate lookup
                     })
 
-            print(f"    Found {len(post_list)} posts ({len(posts)} total unique)")
+                print(f"    Found {len(post_trees)} posts ({len(posts)} total unique)")
+
+            elif post_list:
+                # Legacy format fallback: pageProps.posts[]
+                for post in post_list:
+                    post_id = post.get('id') or post.get('postId')
+                    if post_id and post_id not in seen_ids:
+                        seen_ids.add(post_id)
+                        author = post.get('author', {}) or {}
+                        author_name = post.get('authorName') or author.get('name', '')
+                        posts.append({
+                            'id': post_id,
+                            'title': post.get('title', ''),
+                            'content': post.get('content', '') or post.get('body', ''),
+                            'authorName': author_name,
+                            'author': author,
+                            'url': post.get('url') or post.get('postUrl') or f"https://www.skool.com/{community}/{post_id}",
+                            'postUrl': post.get('url') or post.get('postUrl') or f"https://www.skool.com/{community}/{post_id}",
+                            'likesCount': post.get('likesCount', 0),
+                            'commentsCount': post.get('commentsCount', 0),
+                            'createdAt': post.get('createdAt', ''),
+                            'categoryName': post.get('categoryName', ''),
+                        })
+
+                print(f"    Found {len(post_list)} posts ({len(posts)} total unique)")
+
+            else:
+                print(f"    No posts found in pageProps")
 
         if page_num < max_pages:
             await asyncio.sleep(5)
@@ -1399,6 +1421,122 @@ def format_antigravity_notification(mentions: list) -> tuple:
 # - "Cancelled (churns in X days)" = paid cancellation → ALERT
 # - "Trial cancelled (removing in X day)" = trial → skip
 # See: scrape_cancelling_with_page() and detect_new_cancellations()
+
+
+# ============================================================================
+# TEST MODE — fire all 5 notification types with realistic fake data
+# ============================================================================
+
+def run_test_notifications(dry_run: bool = False):
+    """
+    Send one test notification for each type. No scraping — tests the full
+    format → send pipeline with realistic data.
+
+    Usage: python skool_apprise_monitor.py --test
+           python skool_apprise_monitor.py --test --dry-run
+    """
+    print(f"\n{'='*60}")
+    print("TEST MODE — Sending all 5 notification types")
+    print(f"{'='*60}")
+
+    sent = 0
+    total = 5
+
+    # --- 1. New ICP Member (Tier A) ---
+    print("\n[1/5] New ICP Member (Tier A)")
+    test_member = {
+        "name": "Sarah Mitchell",
+        "handle": "sarah-mitchell-test",
+        "bio": "CEO at GrowthStack Digital. Helping local businesses scale with AI automation and GoHighLevel. Former agency owner, now building SaaS.",
+        "profileUrl": "https://www.skool.com/@sarah-mitchell-test",
+        "tier": "A",
+        "icp_score": 72,
+        "match_reasons": ["Position: ceo", "Industry: local business", "Pain: scale"],
+    }
+    test_enrichment = {
+        "company": "GrowthStack Digital",
+        "company_description": "AI-powered marketing automation for local service businesses. Specializes in GoHighLevel implementations.",
+        "services": ["GoHighLevel", "AI Chatbots", "Marketing Automation"],
+        "industries": ["Local Services", "Digital Marketing"],
+        "city": "Austin",
+        "country": "USA",
+        "linkedin_url": "https://linkedin.com/in/sarahmitchell-test",
+        "website": "https://growthstackdigital.com",
+    }
+    title, body = format_member_notification(test_member, test_enrichment)
+    if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+        sent += 1
+
+    # --- 2. ICP Churn (Tier A cancelled) ---
+    print("\n[2/5] ICP Churn (Tier A Cancellation)")
+    test_churn = {
+        "name": "Marcus Rivera",
+        "handle": "marcus-rivera-test",
+        "bio": "Owner of Rivera Home Services. 15 trucks, $2M revenue. Looking for better lead gen.",
+        "tier": "A",
+        "icp_score": 65,
+        "match_reasons": ["Position: owner", "Industry: home services", "Revenue: $2m"],
+        "joinedAt": "2025-11-15T00:00:00Z",
+        "enrichment": {
+            "company": "Rivera Home Services",
+            "company_description": "Full-service HVAC and plumbing company serving the greater Phoenix area.",
+            "services": ["HVAC", "Plumbing", "Emergency Repairs"],
+            "city": "Phoenix",
+            "country": "USA",
+            "linkedin_url": "https://linkedin.com/in/marcusrivera-test",
+            "website": "https://riverahomeservices.com",
+        },
+    }
+    title, body = format_churn_notification(test_churn)
+    if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+        sent += 1
+
+    # --- 3. Financial Win ---
+    print("\n[3/5] Financial Win")
+    test_wins = [{
+        "money_pattern": "$15,000 deal",
+        "author_name": "Jake Thompson",
+        "author_handle": "jake-thompson-test",
+        "title": "Just closed my biggest client ever — $15,000/month retainer for AI automation!",
+        "post_url": "https://www.skool.com/aiautomationsbyjack/test-post-123",
+        "likes_count": 47,
+        "comments_count": 23,
+    }]
+    title, body = format_wins_notification(test_wins)
+    if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+        sent += 1
+
+    # --- 4. Meaningful @florian Mention ---
+    print("\n[4/5] Meaningful @florian Mention")
+    test_mentions = [{
+        "type": "@mention",
+        "author_name": "David Park",
+        "author_handle": "david-park-test",
+        "context": "...has anyone tried building a GoHighLevel integration with AI agents? @florian I saw your post about automation workflows — would love to hear how you approached the appointment booking pipeline...",
+        "post_url": "https://www.skool.com/aiautomationsbyjack/test-mention-456",
+        "meaningful": True,
+    }]
+    title, body = format_mentions_notification(test_mentions)
+    if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+        sent += 1
+
+    # --- 5. Anti-Gravity Brand Mention ---
+    print("\n[5/5] Anti-Gravity Brand Mention")
+    test_ag = [{
+        "author_name": "Lisa Chen",
+        "author_handle": "lisa-chen-test",
+        "keyword": "anti-gravity",
+        "post_title": "Tools and resources that actually helped me scale",
+        "post_url": "https://www.skool.com/aiautomationsbyjack/test-ag-789",
+    }]
+    title, body = format_antigravity_notification(test_ag)
+    if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+        sent += 1
+
+    print(f"\n{'='*60}")
+    print(f"TEST COMPLETE: {sent}/{total} notifications sent")
+    print(f"{'='*60}")
+    return sent
 
 
 # ============================================================================
@@ -1851,7 +1989,13 @@ async def main():
                         help="Run in persistent loop (daemon mode)")
     parser.add_argument("--interval", type=int, default=180,
                         help="Seconds between checks in daemon mode (default: 180)")
+    parser.add_argument("--test", action="store_true",
+                        help="Send test notifications for all 5 alert types (no scraping)")
     args = parser.parse_args()
+
+    if args.test:
+        run_test_notifications(dry_run=args.dry_run)
+        return
 
     if args.daemon:
         await run_daemon(
