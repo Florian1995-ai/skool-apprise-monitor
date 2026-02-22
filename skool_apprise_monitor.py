@@ -988,9 +988,21 @@ def detect_new_cancellations(cancelling_members: list, community: str,
 
     Compares against previously seen cancelling handles to only alert once per member.
     Filters out trial cancellations — only alerts for paid $77/month cancellations.
+    On first run (no state file yet), seeds state silently — no flood of old cancellations.
 
-    Returns list of cancellation dicts ready for notification.
+    Returns list of cancellation dicts ready for ICP scoring + notification.
     """
+    state_path = STATE_DIR / f"cancelling_{community}.json"
+
+    # First run: seed all current handles without alerting (prevents flood on deploy)
+    if not state_path.exists():
+        cancel_state = {"seen_ids": []}
+        all_handles = [m["handle"] for m in cancelling_members if m.get("handle")]
+        add_to_state(cancel_state, all_handles)
+        save_state("cancelling", community, cancel_state)
+        print(f"  Cancelling state initialized: {len(all_handles)} handles (no alerts on first run)")
+        return []
+
     cancel_state = load_state("cancelling", community)
     seen_cancelling = set(cancel_state.get("seen_ids", []))
 
@@ -1006,9 +1018,10 @@ def detect_new_cancellations(cancelling_members: list, community: str,
         # Skip trial cancellations — we only care about PAID cancellations
         if member.get("is_trial"):
             print(f"    Skip trial cancel: {member['name']} ({handle})")
+            seen_cancelling.add(handle)
             continue
 
-        # This is a new paid cancellation — prepare for notification
+        # This is a new paid cancellation — prepare for ICP scoring + notification
         cached = enrichment_cache.get(handle, {})
         enrichment = cached.get("enrichment", {})
 
@@ -1238,42 +1251,56 @@ def format_member_notification(member: dict, enrichment: dict) -> tuple:
     name = member.get("name", "Unknown")
 
     company = enrichment.get("company", "")
-    desc = enrichment.get("company_description", "")
+    desc = (enrichment.get("company_description", "") or "")[:140]
     services = ", ".join(enrichment.get("services", []))
+    industries = ", ".join(enrichment.get("industries", []))
+    city = enrichment.get("city", "")
+    country = enrichment.get("country", "")
+    location = f"{city}, {country}".strip(", ") if (city or country) else ""
+    linkedin = enrichment.get("linkedin") or enrichment.get("linkedin_url", "")
+    website = enrichment.get("website", "")
 
     title = f"NEW ICP [{tier}]: {name} (Score: {score})"
 
     lines = []
+    # Company + what they do
     if company and desc:
         lines.append(f"{company} — {desc}")
     elif company:
         lines.append(company)
     elif desc:
         lines.append(desc)
+    elif member.get("bio"):
+        lines.append(member["bio"][:140])
 
+    # Services / industries
     if services:
         lines.append(f"Services: {services}")
+    if industries and not services:
+        lines.append(f"Industry: {industries}")
 
+    # Location
+    if location:
+        lines.append(f"Location: {location}")
+
+    # Why flagged
     reasons = ", ".join(member.get("match_reasons", []))
     if reasons:
         lines.append(f"Signals: {reasons}")
 
-    if member.get("bio"):
-        lines.append(f"Bio: {member['bio'][:120]}")
-
     lines.append("")
     lines.append(f"Skool: {member.get('profileUrl', '')}")
-    if enrichment.get("linkedin"):
-        lines.append(f"LinkedIn: {enrichment['linkedin']}")
-    if enrichment.get("website"):
-        lines.append(f"Website: {enrichment['website']}")
+    if linkedin:
+        lines.append(f"LinkedIn: {linkedin}")
+    if website:
+        lines.append(f"Website: {website}")
 
     body = "\n".join(lines)
     return title, body
 
 
 def format_churn_notification(member_data: dict) -> tuple:
-    """Format a paid cancellation notification with enrichment links."""
+    """Format a paid ICP cancellation notification with enrichment links."""
     name = member_data.get("name", "Unknown")
     handle = member_data.get("handle", "")
     tier = member_data.get("tier", "unknown")
@@ -1281,31 +1308,44 @@ def format_churn_notification(member_data: dict) -> tuple:
     enrichment = member_data.get("enrichment", {})
     bio = member_data.get("bio", "")
 
-    if tier in ("A", "B"):
-        title = f"CANCELLED [{tier}]: {name} — $77/mo (Score: {score})"
-    else:
-        title = f"CANCELLED: {name} — $77/mo membership"
+    title = f"CANCELLED [{tier}]: {name} — $77/mo (Score: {score})"
 
     lines = []
     company = enrichment.get("company", "")
-    desc = enrichment.get("company_description", "")
+    desc = (enrichment.get("company_description", "") or "")[:140]
+    services = ", ".join(enrichment.get("services", []))
+    city = enrichment.get("city", "")
+    country = enrichment.get("country", "")
+    location = f"{city}, {country}".strip(", ") if (city or country) else ""
+    linkedin = enrichment.get("linkedin") or enrichment.get("linkedin_url", "")
+    website = enrichment.get("website", "")
+
     if company and desc:
         lines.append(f"{company} — {desc}")
     elif company:
         lines.append(company)
-    if bio and not company:
-        lines.append(f"Bio: {bio[:120]}")
+    elif bio:
+        lines.append(bio[:140])
+
+    if services:
+        lines.append(f"Services: {services}")
+    if location:
+        lines.append(f"Location: {location}")
 
     joined = member_data.get("joinedAt", "")
     if joined:
         lines.append(f"Joined: {joined[:10]}")
 
+    reasons = ", ".join(member_data.get("match_reasons", []))
+    if reasons:
+        lines.append(f"Signals: {reasons}")
+
     lines.append("")
     lines.append(f"Skool: https://www.skool.com/@{handle}")
-    if enrichment.get("linkedin"):
-        lines.append(f"LinkedIn: {enrichment['linkedin']}")
-    if enrichment.get("website"):
-        lines.append(f"Website: {enrichment['website']}")
+    if linkedin:
+        lines.append(f"LinkedIn: {linkedin}")
+    if website:
+        lines.append(f"Website: {website}")
 
     body = "\n".join(lines)
     return title, body
@@ -1448,8 +1488,7 @@ async def run_monitor(community: str, headless: bool = True,
                         if m.get("tier") in ("A", "B"):
                             results["new_members"] += 1
                             title, body = format_member_notification(m, enrichment)
-                            notify_type = "warning" if m["tier"] == "A" else "info"
-                            if send_apprise_notification(title, body, notify_type=notify_type, dry_run=dry_run):
+                            if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
                                 results["notifications_sent"] += 1
 
                             # Log event for daily digest
@@ -1509,41 +1548,55 @@ async def run_monitor(community: str, headless: bool = True,
             if not init:
                 new_cancellations = detect_new_cancellations(cancelling, community, enrichment_cache)
                 if new_cancellations:
-                    results["churned"] = len(new_cancellations)
-                    print(f"  NEW paid cancellations: {len(new_cancellations)}")
+                    print(f"  NEW paid cancellations to evaluate: {len(new_cancellations)}")
+                    notified = 0
 
                     for cancel in new_cancellations:
                         handle = cancel["handle"]
 
-                        # Enrich cancelling member if not already cached
-                        if not cancel.get("enrichment") or not cancel["enrichment"].get("linkedin"):
+                        # Enrich cancelling member (Perplexity + Tavily LinkedIn)
+                        if not cancel.get("enrichment") or not cancel["enrichment"].get("company"):
                             enrichment = enrich_member(cancel)
                             cancel["enrichment"] = enrichment
-                            # Update cache
-                            enrichment_cache[handle] = {
-                                "name": cancel.get("name", ""),
-                                "handle": handle,
-                                "tier": cancel.get("tier", "unknown"),
-                                "icp_score": cancel.get("icp_score", 0),
-                                "enrichment": enrichment,
-                                "cached_at": datetime.now(timezone.utc).isoformat(),
-                            }
+                        else:
+                            enrichment = cancel["enrichment"]
+
+                        # Re-score WITH enrichment data now available
+                        cancel = quick_score_member(cancel, enrichment)
+
+                        # ICP FILTER: only notify for Tier A or B members
+                        tier = cancel.get("tier", "D")
+                        if tier not in ("A", "B"):
+                            print(f"    Skip (not ICP, tier {tier}): {cancel['name']}")
+                            log_event(community, "cancellation", cancel)  # Log for digest
+                            continue
+
+                        # Update enrichment cache with full data
+                        enrichment_cache[handle] = {
+                            "name": cancel.get("name", ""),
+                            "handle": handle,
+                            "tier": tier,
+                            "icp_score": cancel.get("icp_score", 0),
+                            "enrichment": enrichment,
+                            "cached_at": datetime.now(timezone.utc).isoformat(),
+                        }
 
                         title, body = format_churn_notification(cancel)
-                        if send_apprise_notification(title, body, notify_type="failure", dry_run=dry_run):
+                        # Use "info" — silent visual popup, no sound
+                        if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+                            notified += 1
                             results["notifications_sent"] += 1
                         log_event(community, "cancellation", cancel)
 
+                    results["churned"] = notified
+                    if notified:
+                        print(f"  ICP cancellation alerts sent: {notified}")
                     save_enrichment_cache(community, enrichment_cache)
                 else:
                     print(f"  No new paid cancellations")
             else:
-                # Init mode: seed cancelling state without alerting
-                cancel_state = load_state("cancelling", community)
-                all_handles = [m["handle"] for m in cancelling]
-                add_to_state(cancel_state, all_handles)
-                save_state("cancelling", community, cancel_state)
-                print(f"  Initialized cancelling state with {len(all_handles)} handles.")
+                # Init mode (--init flag): handled in detect_new_cancellations on first run
+                print(f"  Cancelling tab: {len(cancelling)} members (init mode, no alerts)")
 
         except Exception as e:
             print(f"  ERROR in cancellation monitoring: {e}")
@@ -1576,7 +1629,7 @@ async def run_monitor(community: str, headless: bool = True,
                 if wins:
                     results["wins"] = len(wins)
                     title, body = format_wins_notification(wins)
-                    if send_apprise_notification(title, body, notify_type="success", dry_run=dry_run):
+                    if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
                         results["notifications_sent"] += 1
                     print(f"  Financial wins: {len(wins)}")
                     for w in wins:
@@ -1587,7 +1640,7 @@ async def run_monitor(community: str, headless: bool = True,
                 if ag_mentions:
                     results["antigravity"] = len(ag_mentions)
                     title, body = format_antigravity_notification(ag_mentions)
-                    if send_apprise_notification(title, body, notify_type="warning", dry_run=dry_run):
+                    if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
                         results["notifications_sent"] += 1
                     print(f"  Anti-gravity mentions: {len(ag_mentions)}")
                     for ag in ag_mentions:
