@@ -49,22 +49,6 @@
       "desktop_push": "ntfy://ntfy.sh/skool-icp-cb311748",
       "include_draft": true
     },
-    "adam": {
-      "email": "adam@aiautomationsbyjack.com",
-      "receives": [
-        "new_qualified_member",
-        "churn_qualified_member",
-        "monetary_win"
-      ],
-      "include_draft": false
-    },
-    "lanie": {
-      "email": "lanie@aiautomationsbyjack.com",
-      "receives": [
-        "churn_qualified_member"
-      ],
-      "include_draft": false
-    }
   },
 
   "messaging": {
