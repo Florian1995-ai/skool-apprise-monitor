@@ -140,12 +140,9 @@ def build_apprise_urls():
 
 
 # ============================================================================
-# POST VECTORIZATION (Supabase pgvector)
+# POST VECTORIZATION (Supabase pgvector) — uses raw requests, no extra packages
 # ============================================================================
 
-# Lazy-loaded clients (only initialized if env vars are set)
-_supabase_client = None
-_openai_client = None
 _vectorize_enabled = None
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
@@ -156,8 +153,8 @@ POSTS_TABLE = "skool_posts"
 
 
 def _init_vectorize():
-    """Initialize Supabase + OpenAI clients for vectorization. Returns True if ready."""
-    global _supabase_client, _openai_client, _vectorize_enabled
+    """Check if vectorization env vars are set. Returns True if ready."""
+    global _vectorize_enabled
 
     if _vectorize_enabled is not None:
         return _vectorize_enabled
@@ -167,16 +164,21 @@ def _init_vectorize():
         _vectorize_enabled = False
         return False
 
+    # Quick table check via REST
     try:
-        from supabase import create_client
-        from openai import OpenAI
-        _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
-        # Quick table check
-        _supabase_client.table(POSTS_TABLE).select("id").limit(1).execute()
-        _vectorize_enabled = True
-        print("  [vectorize] Enabled — Supabase + OpenAI connected")
-        return True
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{POSTS_TABLE}?select=id&limit=1",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            _vectorize_enabled = True
+            print("  [vectorize] Enabled — Supabase + OpenAI connected")
+            return True
+        else:
+            print(f"  [vectorize] Disabled — table check returned {r.status_code}: {r.text[:100]}")
+            _vectorize_enabled = False
+            return False
     except Exception as e:
         print(f"  [vectorize] Disabled — init error: {e}")
         _vectorize_enabled = False
@@ -201,6 +203,37 @@ def _build_post_embedding_text(post: dict) -> str:
     return "\n".join(parts)
 
 
+def _openai_embeddings(texts: list) -> list:
+    """Generate embeddings via OpenAI REST API (no sdk needed)."""
+    r = requests.post(
+        "https://api.openai.com/v1/embeddings",
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={"model": EMBEDDING_MODEL, "input": texts},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return [item["embedding"] for item in r.json()["data"]]
+
+
+def _supabase_upsert(records: list):
+    """Upsert records to Supabase via REST API (no sdk needed)."""
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/{POSTS_TABLE}",
+        headers={
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates",
+        },
+        json=records,
+        timeout=30,
+    )
+    r.raise_for_status()
+
+
 def vectorize_new_posts(posts: list, community: str):
     """Embed and upsert new posts to Supabase. Gracefully skips if not configured."""
     if not _init_vectorize():
@@ -210,8 +243,6 @@ def vectorize_new_posts(posts: list, community: str):
         return
 
     try:
-        import hashlib
-
         # Build embedding texts + records
         embedding_texts = []
         records = []
@@ -248,19 +279,15 @@ def vectorize_new_posts(posts: list, community: str):
         if not records:
             return
 
-        # Generate embeddings in one batch
-        response = _openai_client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=embedding_texts,
-        )
-        embeddings = [item.embedding for item in response.data]
+        # Generate embeddings via OpenAI REST API
+        embeddings = _openai_embeddings(embedding_texts)
 
         # Add embeddings to records
         for record, embedding in zip(records, embeddings):
             record["embedding"] = embedding
 
-        # Upsert (on conflict = update)
-        _supabase_client.table(POSTS_TABLE).upsert(records).execute()
+        # Upsert via Supabase REST API
+        _supabase_upsert(records)
         print(f"  [vectorize] Upserted {len(records)} posts to Supabase")
 
     except Exception as e:
