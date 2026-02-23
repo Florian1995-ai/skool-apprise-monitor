@@ -38,6 +38,9 @@ Environment (.env):
     PERPLEXITY_API_KEY     — For member enrichment
     TAVILY_API_KEY_5       — For LinkedIn finder (keys 1-4 exhausted)
     TAVILY_API_KEY_6       — Fallback LinkedIn finder key
+    OPENAI_API_KEY         — For post vectorization (text-embedding-3-small)
+    SUPABASE_URL           — Supabase project URL
+    SUPABASE_KEY           — Supabase service role key
 """
 
 import sys
@@ -134,6 +137,135 @@ def build_apprise_urls():
     if custom:
         urls.extend([u.strip() for u in custom.split(",") if u.strip()])
     return urls
+
+
+# ============================================================================
+# POST VECTORIZATION (Supabase pgvector)
+# ============================================================================
+
+# Lazy-loaded clients (only initialized if env vars are set)
+_supabase_client = None
+_openai_client = None
+_vectorize_enabled = None
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+EMBEDDING_MODEL = "text-embedding-3-small"
+POSTS_TABLE = "skool_posts"
+
+
+def _init_vectorize():
+    """Initialize Supabase + OpenAI clients for vectorization. Returns True if ready."""
+    global _supabase_client, _openai_client, _vectorize_enabled
+
+    if _vectorize_enabled is not None:
+        return _vectorize_enabled
+
+    if not SUPABASE_URL or not SUPABASE_KEY or not OPENAI_API_KEY:
+        print("  [vectorize] Disabled — missing SUPABASE_URL, SUPABASE_KEY, or OPENAI_API_KEY")
+        _vectorize_enabled = False
+        return False
+
+    try:
+        from supabase import create_client
+        from openai import OpenAI
+        _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+        # Quick table check
+        _supabase_client.table(POSTS_TABLE).select("id").limit(1).execute()
+        _vectorize_enabled = True
+        print("  [vectorize] Enabled — Supabase + OpenAI connected")
+        return True
+    except Exception as e:
+        print(f"  [vectorize] Disabled — init error: {e}")
+        _vectorize_enabled = False
+        return False
+
+
+def _build_post_embedding_text(post: dict) -> str:
+    """Build embedding text from post dict (monitor format)."""
+    parts = []
+    title = post.get("title") or ""
+    if title:
+        parts.append(f"Title: {title}")
+    author = post.get("authorName") or ""
+    if author:
+        parts.append(f"Author: {author}")
+    category = post.get("categoryName") or ""
+    if category:
+        parts.append(f"Category: {category}")
+    content = (post.get("content") or "")[:2000]
+    if content:
+        parts.append(f"Content: {content}")
+    return "\n".join(parts)
+
+
+def vectorize_new_posts(posts: list, community: str):
+    """Embed and upsert new posts to Supabase. Gracefully skips if not configured."""
+    if not _init_vectorize():
+        return
+
+    if not posts:
+        return
+
+    try:
+        import hashlib
+
+        # Build embedding texts + records
+        embedding_texts = []
+        records = []
+        for post in posts:
+            post_id = str(post.get("id", ""))
+            if not post_id:
+                continue
+            post_url = post.get("postUrl") or post.get("url") or ""
+            slug = post.get("slug") or (post_url.split("/")[-1] if "/" in post_url else "")
+            author = post.get("authorName") or ""
+            emb_text = _build_post_embedding_text(post)
+
+            embedding_texts.append(emb_text)
+            records.append({
+                "id": post_id,
+                "community": community,
+                "title": (post.get("title") or "")[:500],
+                "slug": slug,
+                "content": (post.get("content") or "")[:10000],
+                "author_name": author,
+                "author_id": (post.get("author", {}) or {}).get("username", ""),
+                "author_profile_url": "",
+                "created_at": post.get("createdAt") or None,
+                "likes": post.get("likesCount", 0) or 0,
+                "comment_count": post.get("commentsCount", 0) or 0,
+                "pinned": False,
+                "category": post.get("categoryName") or "",
+                "category_id": "",
+                "post_url": post_url,
+                "comments": "[]",
+                "embedding_text": emb_text[:5000],
+            })
+
+        if not records:
+            return
+
+        # Generate embeddings in one batch
+        response = _openai_client.embeddings.create(
+            model=EMBEDDING_MODEL,
+            input=embedding_texts,
+        )
+        embeddings = [item.embedding for item in response.data]
+
+        # Add embeddings to records
+        for record, embedding in zip(records, embeddings):
+            record["embedding"] = embedding
+
+        # Upsert (on conflict = update)
+        _supabase_client.table(POSTS_TABLE).upsert(records).execute()
+        print(f"  [vectorize] Upserted {len(records)} posts to Supabase")
+
+    except Exception as e:
+        print(f"  [vectorize] Error: {e}")
+        # Non-fatal — monitor continues even if vectorization fails
 
 
 # ============================================================================
@@ -1803,6 +1935,9 @@ async def run_monitor(community: str, headless: bool = True,
                     # Log ALL mentions (meaningful and noise) for daily digest
                     for m in mentions:
                         log_event(community, "mention", m)
+
+                # Vectorize new posts to Supabase (non-blocking, graceful degradation)
+                vectorize_new_posts(new_posts, community)
 
                 post_ids = [str(p.get("id", "")) for p in posts if p.get("id")]
                 add_to_state(post_state, post_ids)

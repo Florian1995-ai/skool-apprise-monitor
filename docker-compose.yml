@@ -37,6 +37,9 @@ services:
       - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY:-}
       - TAVILY_API_KEY_5=${TAVILY_API_KEY_5:-}
       - TAVILY_API_KEY_6=${TAVILY_API_KEY_6:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - SUPABASE_URL=${SUPABASE_URL:-}
+      - SUPABASE_KEY=${SUPABASE_KEY:-}
     volumes:
       - monitor-state:/app/state
     depends_on:
