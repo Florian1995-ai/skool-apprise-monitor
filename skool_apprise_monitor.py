@@ -124,6 +124,10 @@ DISCUSSION_INDICATORS = {
 }
 
 
+# SAFETY: Only these email addresses may receive emails via ANY path
+ALLOWED_EMAIL_RECIPIENTS = {"florian@florianrolke.com", "roelkeflorian@gmail.com"}
+
+
 def build_apprise_urls():
     """Build Apprise notification URLs from env vars."""
     urls = []
@@ -132,7 +136,10 @@ def build_apprise_urls():
     smtp_pass = os.getenv("SMTP_PASS", os.getenv("NOTIFY_EMAIL_PASSWORD", ""))
     smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
     if email_to and smtp_user and smtp_pass:
-        urls.append(f"mailto://{smtp_user}:{smtp_pass}@{smtp_host}?to={email_to}")
+        if email_to.lower().strip() not in ALLOWED_EMAIL_RECIPIENTS:
+            print(f"  [BLOCKED] Apprise mailto to {email_to} — not in allowed list {ALLOWED_EMAIL_RECIPIENTS}")
+        else:
+            urls.append(f"mailto://{smtp_user}:{smtp_pass}@{smtp_host}?to={email_to}")
     custom = os.getenv("APPRISE_URLS", "")
     if custom:
         urls.extend([u.strip() for u in custom.split(",") if u.strip()])

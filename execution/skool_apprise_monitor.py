@@ -78,6 +78,9 @@ APPRISE_URL = os.getenv("APPRISE_URL", "https://notify.florianrolke.com")
 # Can add more channels later: slack://, tgram://, windows://, etc.
 APPRISE_NOTIFY_URLS = []
 
+# SAFETY: Only these email addresses may receive emails via ANY path (Apprise, SMTP, etc.)
+ALLOWED_EMAIL_RECIPIENTS = {"florian@florianrolke.com", "roelkeflorian@gmail.com"}
+
 def build_apprise_urls():
     """Build Apprise notification URLs from env vars."""
     urls = []
@@ -89,8 +92,12 @@ def build_apprise_urls():
     smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
 
     if email_to and smtp_user and smtp_pass:
-        # Apprise mailto URL format
-        urls.append(f"mailto://{smtp_user}:{smtp_pass}@{smtp_host}?to={email_to}")
+        # WHITELIST CHECK: Block Apprise mailto to non-whitelisted addresses
+        if email_to.lower().strip() not in ALLOWED_EMAIL_RECIPIENTS:
+            print(f"  [BLOCKED] Apprise mailto to {email_to} — not in allowed list {ALLOWED_EMAIL_RECIPIENTS}")
+        else:
+            # Apprise mailto URL format
+            urls.append(f"mailto://{smtp_user}:{smtp_pass}@{smtp_host}?to={email_to}")
 
     # Add any custom URLs from env
     custom = os.getenv("APPRISE_URLS", "")

@@ -54,6 +54,18 @@ logger = logging.getLogger("email-notifier")
 DEFAULT_SMTP_HOST = "smtp.gmail.com"
 DEFAULT_SMTP_PORT = 587
 
+# SAFETY: Only these addresses may receive emails. All others are blocked.
+ALLOWED_RECIPIENTS = {"florian@florianrolke.com", "roelkeflorian@gmail.com"}
+
+
+def _check_recipient_allowed(recipient: str) -> bool:
+    """Block all email recipients except Florian's own addresses."""
+    if recipient.lower().strip() in ALLOWED_RECIPIENTS:
+        return True
+    logger.warning(f"BLOCKED: email to {recipient} — not in allowed list {ALLOWED_RECIPIENTS}")
+    print(f"  [BLOCKED] Email to {recipient} — only {ALLOWED_RECIPIENTS} allowed.")
+    return False
+
 
 def get_config() -> dict:
     """Load email configuration from environment."""
@@ -89,6 +101,8 @@ def send_email(to: str, subject: str, body: str, from_name: str = "Skool Monitor
     recipient = to or config["to_email"]
     if not recipient:
         return {"status": "error", "reason": "no_recipient"}
+    if not _check_recipient_allowed(recipient):
+        return {"status": "blocked", "reason": f"recipient {recipient} not in allowed list"}
 
     msg = MIMEText(body, "plain", "utf-8")
     msg["From"] = f"{from_name} <{config['from_email']}>"
@@ -134,6 +148,8 @@ def send_html_email(to: str, subject: str, html_body: str, text_body: str = "",
     recipient = to or config["to_email"]
     if not recipient:
         return {"status": "error", "reason": "no_recipient"}
+    if not _check_recipient_allowed(recipient):
+        return {"status": "blocked", "reason": f"recipient {recipient} not in allowed list"}
 
     msg = MIMEMultipart("alternative")
     msg["From"] = f"{from_name} <{config['from_email']}>"
