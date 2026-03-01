@@ -186,8 +186,19 @@ def send_desktop_push(title: str, body: str, ntfy_url: str, notify_type: str = "
         return False
 
 
+ALLOWED_EMAIL_RECIPIENTS = {"florian@florianrolke.com", "roelkeflorian@gmail.com"}
+
+
+def _is_email_allowed(email: str) -> bool:
+    """Only allow sending to Florian's own addresses. Block all others."""
+    return email.lower().strip() in ALLOWED_EMAIL_RECIPIENTS
+
+
 def send_email_alert(to: str, subject: str, html_body: str, text_body: str, dry_run: bool = False) -> bool:
-    """Send email alert via email_notifier.py."""
+    """Send email alert via email_notifier.py. Only sends to whitelisted addresses."""
+    if not _is_email_allowed(to):
+        print(f"  [BLOCKED] Email to {to} blocked — not in allowed recipients. Only {ALLOWED_EMAIL_RECIPIENTS} allowed.")
+        return False
     if dry_run:
         print(f"  [DRY RUN] Email to {to}: {subject}")
         return True

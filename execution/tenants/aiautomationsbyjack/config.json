@@ -46,7 +46,7 @@
         "monetary_win",
         "antigravity_mention"
       ],
-      "desktop_push": "ntfy://ntfy.sh/skool-icp-cb311748",
+      "desktop_push": "ntfy://push.florianrolke.com/skool-alerts",
       "include_draft": true
     },
   },
