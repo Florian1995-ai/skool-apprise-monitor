@@ -16,6 +16,11 @@ RUN mkdir -p /app/state/events
 COPY skool_apprise_monitor.py .
 COPY skool_daily_digest_v3.py .
 
-# Daemon mode: members + cancellations + posts every 3 minutes
-# Daily digest triggers at 9:30pm EST (02:30 UTC) automatically
-CMD ["python", "skool_apprise_monitor.py", "--daemon", "--interval", "180"]
+# Copy Dhruv's LinkedIn post monitor
+COPY dhruv-linkedin-monitor/ ./dhruv-linkedin-monitor/
+
+# Entrypoint runs both monitors in parallel
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
+
+CMD ["./entrypoint.sh"]
