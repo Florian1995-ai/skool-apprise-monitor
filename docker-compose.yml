@@ -20,14 +20,22 @@ services:
       timeout: 10s
       retries: 3
 
-  # Skool Monitor — runs every 15 minutes via cron
-  # On Coolify: deploy this as a "Scheduled Task" instead
+  # Skool Monitor — always-on daemon, default 3-minute polling interval
   monitor:
     build: .
     container_name: skool-monitor
+    restart: unless-stopped
     environment:
       - SKOOL_AUTH_TOKEN=${SKOOL_AUTH_TOKEN}
       - SKOOL_CLIENT_ID=${SKOOL_CLIENT_ID:-}
+      - MONITOR_INTERVAL_SECONDS=${MONITOR_INTERVAL_SECONDS:-180}
+      - NTFY_URL=${NTFY_URL:-https://push.florianrolke.com/skool-alerts}
+      - MENTION_KEYWORDS=${MENTION_KEYWORDS:-@florianrolke,@florian,florianrolke,florian rolke}
+      - INTRO_CATEGORY_KEYWORDS=${INTRO_CATEGORY_KEYWORDS:-intro,introduction,introductions,start here}
+      - NOTIFY_ALL_NEW_POSTS=${NOTIFY_ALL_NEW_POSTS:-false}
+      - ALL_NEW_POSTS_NOTIFY_LIMIT=${ALL_NEW_POSTS_NOTIFY_LIMIT:-10}
+      - COMMENT_SCAN_POST_LIMIT=${COMMENT_SCAN_POST_LIMIT:-20}
+      - COMMENT_PAGE_DELAY_SECONDS=${COMMENT_PAGE_DELAY_SECONDS:-1}
       - APPRISE_URL=http://apprise:8000
       - APPRISE_EMAIL_TO=${APPRISE_EMAIL_TO:-florian@florianrolke.com}
       - SMTP_USER=${SMTP_USER:-}
@@ -42,13 +50,6 @@ services:
       - SUPABASE_KEY=${SUPABASE_KEY:-}
     volumes:
       - monitor-state:/app/state
-    depends_on:
-      apprise:
-        condition: service_healthy
-    # For local testing: run once and exit
-    # For production: use Coolify scheduled task or system cron
-    profiles:
-      - manual
 
 volumes:
   apprise-config:

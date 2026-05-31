@@ -33,6 +33,7 @@ Requires:
 
 Environment (.env):
     SKOOL_AUTH_TOKEN       — Skool session cookie (required)
+    NTFY_URL               — Primary ntfy topic URL (e.g. https://push.florianrolke.com/skool-alerts)
     APPRISE_URL            — Apprise API base URL (e.g. https://notify.florianrolke.com)
     APPRISE_URLS           — Notification URLs (e.g. ntfy://ntfy.sh/skool-icp-cb311748)
     PERPLEXITY_API_KEY     — For member enrichment
@@ -77,6 +78,11 @@ EVENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 COMMUNITY = os.getenv("COMMUNITY", "aiautomationsbyjack")
 APPRISE_URL = os.getenv("APPRISE_URL", "https://notify.florianrolke.com")
+NTFY_URL = os.getenv("NTFY_URL", os.getenv("FLORIAN_NTFY_URL", "")).strip()
+COMMENT_PAGE_DELAY_SECONDS = float(os.getenv("COMMENT_PAGE_DELAY_SECONDS", "1"))
+COMMENT_SCAN_POST_LIMIT = int(os.getenv("COMMENT_SCAN_POST_LIMIT", "20"))
+NOTIFY_ALL_NEW_POSTS = os.getenv("NOTIFY_ALL_NEW_POSTS", "false").strip().lower() in {"1", "true", "yes", "on"}
+ALL_NEW_POSTS_NOTIFY_LIMIT = int(os.getenv("ALL_NEW_POSTS_NOTIFY_LIMIT", "10"))
 
 # API keys for enrichment
 PERPLEXITY_KEY = os.getenv("PERPLEXITY_API_KEY", "")
@@ -90,8 +96,31 @@ for suffix in ["_5", "_6", "", "_2", "_3", "_4"]:
 _tavily_idx = 0
 _tavily_exhausted = set()
 
-# Mention keywords
-MENTION_KEYWORDS = ["@florian", "florian rolke"]
+# Mention keywords. Exact @handles always notify; name-only matches still use
+# the meaningful-mention filter to suppress low-value gratitude noise.
+_mention_keywords_env = os.getenv("MENTION_KEYWORDS", "")
+MENTION_KEYWORDS = [
+    k.strip()
+    for k in (_mention_keywords_env.split(",") if _mention_keywords_env else [
+        "@florianrolke",
+        "@florian",
+        "florianrolke",
+        "florian rolke",
+    ])
+    if k.strip()
+]
+
+_intro_keywords_env = os.getenv("INTRO_CATEGORY_KEYWORDS", "")
+INTRO_CATEGORY_KEYWORDS = [
+    k.strip().lower()
+    for k in (_intro_keywords_env.split(",") if _intro_keywords_env else [
+        "intro",
+        "introduction",
+        "introductions",
+        "start here",
+    ])
+    if k.strip()
+]
 
 # Anti-gravity / brand keywords
 ANTIGRAVITY_KEYWORDS = [
@@ -639,6 +668,39 @@ AI_AGENCY_KEYWORDS = [
     "ai solutions", "ai services", "ai integration",
 ]
 
+REAL_ESTATE_KEYWORDS = [
+    "real estate", "realtor", "realty", "brokerage", "property management",
+    "property manager", "property investor", "real estate investor",
+    "commercial real estate", "multifamily", "multi-family", "single family",
+    "wholesale real estate", "wholesaling", "house flipper", "fix and flip",
+    "mortgage broker", "loan officer", "title company", "escrow",
+]
+
+US_LOCATION_KEYWORDS = [
+    "united states", "usa", "u.s.", "america",
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+    "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
+    "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
+    "maine", "maryland", "massachusetts", "michigan", "minnesota",
+    "mississippi", "missouri", "montana", "nebraska", "nevada",
+    "new hampshire", "new jersey", "new mexico", "new york",
+    "north carolina", "north dakota", "ohio", "oklahoma", "oregon",
+    "pennsylvania", "rhode island", "south carolina", "south dakota",
+    "tennessee", "texas", "utah", "vermont", "virginia", "washington",
+    "west virginia", "wisconsin", "wyoming",
+    "los angeles", "san francisco", "san diego", "new york", "miami",
+    "austin", "dallas", "houston", "phoenix", "denver", "chicago",
+    "atlanta", "charlotte", "nashville", "orlando", "tampa", "seattle",
+]
+
+US_STATE_ABBREVIATIONS = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+    "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+    "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+    "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+    "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+}
+
 
 def quick_score_member(member: dict, enrichment: dict = None) -> dict:
     """Keyword-based ICP scoring. Uses bio + enrichment data for scoring."""
@@ -696,6 +758,88 @@ def quick_score_member(member: dict, enrichment: dict = None) -> dict:
     return member
 
 
+def _member_signal_text(member: dict, enrichment: dict | None = None) -> str:
+    parts = [
+        member.get("name", ""),
+        member.get("bio", ""),
+        member.get("location", ""),
+        member.get("raw_location", ""),
+    ]
+    raw_fields = member.get("raw_fields", {}) or {}
+    for key in ("location", "city", "state", "country", "bio", "headline"):
+        value = raw_fields.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+    if enrichment:
+        parts.extend([
+            enrichment.get("company", ""),
+            enrichment.get("company_description", ""),
+            " ".join(enrichment.get("services", [])),
+            " ".join(enrichment.get("industries", [])),
+            enrichment.get("city", ""),
+            enrichment.get("country", ""),
+        ])
+    return " ".join(p for p in parts if p).lower()
+
+
+def _member_location_text(member: dict, enrichment: dict | None = None) -> str:
+    raw_fields = member.get("raw_fields", {}) or {}
+    parts = [
+        member.get("location", ""),
+        member.get("raw_location", ""),
+        raw_fields.get("location", ""),
+        raw_fields.get("city", ""),
+        raw_fields.get("state", ""),
+        raw_fields.get("country", ""),
+    ]
+    if enrichment:
+        parts.extend([enrichment.get("city", ""), enrichment.get("country", "")])
+    return " ".join(str(p) for p in parts if p)
+
+
+def _match_us_location(text: str, location_text: str = "") -> str:
+    combined = text.lower()
+    for keyword in US_LOCATION_KEYWORDS:
+        if keyword in combined:
+            return keyword
+
+    loc = location_text.strip()
+    if loc:
+        loc_upper = re.sub(r"[^A-Za-z]", " ", loc).upper()
+        tokens = set(loc_upper.split())
+        matches = sorted(tokens & US_STATE_ABBREVIATIONS)
+        if matches:
+            return matches[0]
+
+    abbreviation_pattern = r",\s*(" + "|".join(sorted(US_STATE_ABBREVIATIONS)) + r")\b"
+    match = re.search(abbreviation_pattern, text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+    return ""
+
+
+def detect_real_estate_us_members(members: list, enrichment_by_handle: dict | None = None) -> list:
+    """Find new members who appear real-estate-related and US-based."""
+    matches = []
+    enrichment_by_handle = enrichment_by_handle or {}
+    for member in members:
+        handle = (member.get("handle") or "").lower()
+        enrichment = enrichment_by_handle.get(handle)
+        signal_text = _member_signal_text(member, enrichment)
+        real_estate_kw = next((kw for kw in REAL_ESTATE_KEYWORDS if kw in signal_text), "")
+        if not real_estate_kw:
+            continue
+        location_text = _member_location_text(member, enrichment)
+        us_signal = _match_us_location(signal_text, location_text)
+        if not us_signal:
+            continue
+        enriched = dict(member)
+        enriched["real_estate_signal"] = real_estate_kw
+        enriched["us_signal"] = us_signal
+        matches.append(enriched)
+    return matches
+
+
 # ============================================================================
 # DETECTION: WINS + MENTIONS + MEANINGFUL TAGS
 # ============================================================================
@@ -745,39 +889,122 @@ def is_meaningful_mention(post: dict) -> bool:
     return has_question or has_discussion
 
 
+def _combined_text(item: dict) -> str:
+    """Return title + content/body text for mention detection."""
+    title = item.get('title', '') or ''
+    content = item.get('content', '') or item.get('body', '') or ''
+    return f"{title}\n{content}".strip()
+
+
+def _post_comment_count(post: dict) -> int:
+    try:
+        return int(post.get('commentsCount', post.get('commentCount', 0)) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def is_intro_post(post: dict) -> bool:
+    """Return True when a post belongs to an introduction-like category."""
+    category = (
+        post.get('categoryName')
+        or post.get('category')
+        or post.get('labelName')
+        or ''
+    ).lower()
+    return bool(category) and any(keyword in category for keyword in INTRO_CATEGORY_KEYWORDS)
+
+
+def select_posts_for_comment_scan(posts: list, new_posts: list, comment_state: dict,
+                                  limit: int = COMMENT_SCAN_POST_LIMIT) -> list:
+    """Pick new or changed-comment posts for comment mention scanning."""
+    new_ids = {str(p.get('id') or p.get('postId') or '') for p in new_posts}
+    previous_counts = comment_state.get('post_comment_counts', {}) or {}
+    selected = []
+    seen = set()
+
+    for post in posts:
+        post_id = str(post.get('id') or post.get('postId') or '')
+        if not post_id or post_id in seen:
+            continue
+        count = _post_comment_count(post)
+        if count <= 0:
+            continue
+        previous = previous_counts.get(post_id)
+        if post_id in new_ids or previous is None or int(previous or 0) != count:
+            selected.append(post)
+            seen.add(post_id)
+        if len(selected) >= limit:
+            break
+
+    return selected
+
+
+def detect_mentions_in_source(source: dict, location: str = "post",
+                              parent_post: dict | None = None) -> list:
+    """Detect configured mention keywords in a post or comment source."""
+    content = _combined_text(source)
+    content_lower = content.lower()
+    mentions = []
+
+    for keyword in MENTION_KEYWORDS:
+        keyword_lower = keyword.lower()
+        if keyword_lower not in content_lower:
+            continue
+
+        exact_tag = keyword.startswith('@')
+        meaningful = True if exact_tag else is_meaningful_mention({
+            'title': source.get('title', ''),
+            'content': content,
+        })
+        pos = content_lower.find(keyword_lower)
+        start = max(0, pos - 80)
+        end = min(len(content), pos + len(keyword) + 80)
+        context = content[start:end].strip()
+        if start > 0:
+            context = '...' + context
+        if end < len(content):
+            context = context + '...'
+
+        post = parent_post or source
+        mentions.append({
+            'post_id': post.get('id') or post.get('postId') or source.get('postId'),
+            'comment_id': source.get('id') if location == "comment" else '',
+            'type': '@mention' if exact_tag else 'name_mention',
+            'location': location,
+            'keyword': keyword,
+            'meaningful': meaningful,
+            'author_name': source.get('authorName') or source.get('author', {}).get('name', 'Unknown'),
+            'author_handle': source.get('authorHandle') or source.get('author', {}).get('username', '') or source.get('author', {}).get('name', ''),
+            'post_title': post.get('title', ''),
+            'post_url': post.get('url') or post.get('postUrl', ''),
+            'context': context,
+            'likes_count': post.get('likesCount', post.get('likes', 0)),
+            'comments_count': _post_comment_count(post),
+        })
+        break
+
+    return mentions
+
+
 def detect_mentions(posts: list) -> list:
     """Detect @mentions and name mentions of Florian in posts. Filters for meaningful ones."""
     mentions = []
     for post in posts:
-        content = post.get('content', '') or post.get('title', '')
-        content_lower = content.lower()
+        mentions.extend(detect_mentions_in_source(post, location="post"))
+    return mentions
 
-        for keyword in MENTION_KEYWORDS:
-            if keyword.lower() in content_lower:
-                meaningful = is_meaningful_mention(post)
-                pos = content_lower.find(keyword.lower())
-                start = max(0, pos - 80)
-                end = min(len(content), pos + len(keyword) + 80)
-                context = content[start:end].strip()
-                if start > 0:
-                    context = '...' + context
-                if end < len(content):
-                    context = context + '...'
 
-                mentions.append({
-                    'post_id': post.get('id') or post.get('postId'),
-                    'type': '@mention' if keyword.startswith('@') else 'name_mention',
-                    'keyword': keyword,
-                    'meaningful': meaningful,
-                    'author_name': post.get('authorName') or post.get('author', {}).get('name', 'Unknown'),
-                    'author_handle': post.get('author', {}).get('username', '') or post.get('author', {}).get('name', ''),
-                    'post_title': post.get('title', ''),
-                    'post_url': post.get('url') or post.get('postUrl', ''),
-                    'context': context,
-                    'likes_count': post.get('likesCount', 0),
-                    'comments_count': post.get('commentsCount', 0),
-                })
-                break
+def detect_comment_mentions(comments_by_post: dict, comment_state: dict) -> list:
+    """Detect mentions in newly observed comments only."""
+    seen_comment_ids = {str(i) for i in comment_state.get("seen_ids", [])}
+    mentions = []
+    for post_id, payload in comments_by_post.items():
+        post = payload.get("post", {})
+        for comment in payload.get("comments", []):
+            comment_id = str(comment.get("id") or "")
+            if not comment_id or comment_id in seen_comment_ids:
+                continue
+            mentions.extend(detect_mentions_in_source(comment, location="comment", parent_post=post))
     return mentions
 
 
@@ -868,29 +1095,58 @@ def _parse_members_from_next_data(next_data: dict, community: str, seen_handles:
             handle = m.get("name", "")
             meta = m.get("metadata", {}) or {}
             bio = meta.get("bio", "") or ""
+            location = meta.get("location") or meta.get("city") or meta.get("country") or ""
             member_data = {
                 "name": full_name,
                 "handle": handle,
                 "bio": bio,
+                "location": location,
                 "profileUrl": f"https://www.skool.com/@{handle}",
                 "joinedAt": m.get("createdAt", "") or m.get("joinedAt", ""),
+                "raw_fields": {
+                    "location": meta.get("location", ""),
+                    "city": meta.get("city", ""),
+                    "state": meta.get("state", ""),
+                    "country": meta.get("country", ""),
+                    "headline": meta.get("headline", ""),
+                },
             }
         elif 'user' in m and isinstance(m['user'], dict):
             user = m['user']
+            meta = user.get("metadata", {}) or m.get("metadata", {}) or {}
+            location = user.get("location", "") or meta.get("location", "") or meta.get("city", "") or meta.get("country", "")
             member_data = {
                 "name": user.get("name", ""),
                 "handle": user.get("username", "") or user.get("handle", ""),
                 "bio": user.get("bio", "") or m.get("bio", ""),
+                "location": location,
                 "profileUrl": f"https://www.skool.com/@{user.get('username', '')}",
                 "joinedAt": m.get("createdAt", "") or m.get("joinedAt", ""),
+                "raw_fields": {
+                    "location": location,
+                    "city": meta.get("city", ""),
+                    "state": meta.get("state", ""),
+                    "country": meta.get("country", ""),
+                    "headline": meta.get("headline", ""),
+                },
             }
         else:
+            meta = m.get("metadata", {}) or {}
+            location = m.get("location", "") or meta.get("location", "") or meta.get("city", "") or meta.get("country", "")
             member_data = {
                 "name": m.get("name", ""),
                 "handle": m.get("username", "") or m.get("handle", "") or m.get("name", ""),
                 "bio": m.get("bio", ""),
+                "location": location,
                 "profileUrl": f"https://www.skool.com/@{m.get('username', m.get('handle', m.get('name', '')))}",
                 "joinedAt": m.get("createdAt", "") or m.get("joinedAt", ""),
+                "raw_fields": {
+                    "location": location,
+                    "city": meta.get("city", ""),
+                    "state": meta.get("state", ""),
+                    "country": meta.get("country", ""),
+                    "headline": meta.get("headline", ""),
+                },
             }
 
         handle = member_data["handle"].lower()
@@ -1215,10 +1471,33 @@ def detect_new_cancellations(cancelling_members: list, community: str,
 # POST SCRAPING
 # ============================================================================
 
+def _extract_group_metadata(next_data: dict) -> tuple[str, dict]:
+    """Extract Skool group id and label-id -> category-name mapping."""
+    page_props = next_data.get('props', {}).get('pageProps', {}) or {}
+    current_group = page_props.get('currentGroup', {}) or {}
+    group_id = current_group.get('id', '') or page_props.get('groupId', '')
+    labels = {}
+
+    for label in current_group.get('labels', []) or []:
+        label_id = label.get('id', '')
+        display = (
+            label.get('metadata', {}).get('displayName')
+            or label.get('name')
+            or label.get('displayName')
+            or ''
+        )
+        if label_id and display:
+            labels[label_id] = display
+
+    return group_id, labels
+
+
 async def scrape_posts_with_page(page, community: str, max_pages: int = 2) -> list:
     """Scrape recent posts using an existing Playwright page."""
     posts = []
     seen_ids = set()
+    group_id = ""
+    labels = {}
 
     for page_num in range(1, max_pages + 1):
         url = f"https://www.skool.com/{community}?p={page_num}"
@@ -1236,6 +1515,9 @@ async def scrape_posts_with_page(page, community: str, max_pages: int = 2) -> li
         """)
 
         if next_data:
+            next_group_id, next_labels = _extract_group_metadata(next_data)
+            group_id = group_id or next_group_id
+            labels.update(next_labels)
             page_props = next_data.get('props', {}).get('pageProps', {}) or {}
 
             # Skool uses postTrees[].post with metadata for content
@@ -1254,9 +1536,11 @@ async def scrape_posts_with_page(page, community: str, max_pages: int = 2) -> li
                     meta = raw.get('metadata', {}) or {}
                     user = raw.get('user', {}) or {}
                     slug = raw.get('name', '')
+                    label_id = raw.get('labelId', '') or meta.get('labelId', '')
                     first_name = user.get('firstName', '')
                     last_name = user.get('lastName', '')
                     author_name = f"{first_name} {last_name}".strip() or user.get('name', '')
+                    comment_count = meta.get('comments', 0) or 0
 
                     posts.append({
                         'id': post_id,
@@ -1267,9 +1551,12 @@ async def scrape_posts_with_page(page, community: str, max_pages: int = 2) -> li
                         'url': f"https://www.skool.com/{community}/{slug}" if slug else f"https://www.skool.com/{community}/{post_id}",
                         'postUrl': f"https://www.skool.com/{community}/{slug}" if slug else f"https://www.skool.com/{community}/{post_id}",
                         'likesCount': meta.get('upvotes', 0) or 0,
-                        'commentsCount': meta.get('comments', 0) or 0,
+                        'commentsCount': comment_count,
+                        'commentCount': comment_count,
                         'createdAt': raw.get('createdAt', ''),
-                        'categoryName': '',  # labels ID needs separate lookup
+                        'categoryName': labels.get(label_id, ''),
+                        'categoryId': label_id,
+                        'groupId': group_id,
                     })
 
                 print(f"    Found {len(post_trees)} posts ({len(posts)} total unique)")
@@ -1282,6 +1569,7 @@ async def scrape_posts_with_page(page, community: str, max_pages: int = 2) -> li
                         seen_ids.add(post_id)
                         author = post.get('author', {}) or {}
                         author_name = post.get('authorName') or author.get('name', '')
+                        comment_count = post.get('commentsCount', post.get('commentCount', 0)) or 0
                         posts.append({
                             'id': post_id,
                             'title': post.get('title', ''),
@@ -1291,9 +1579,11 @@ async def scrape_posts_with_page(page, community: str, max_pages: int = 2) -> li
                             'url': post.get('url') or post.get('postUrl') or f"https://www.skool.com/{community}/{post_id}",
                             'postUrl': post.get('url') or post.get('postUrl') or f"https://www.skool.com/{community}/{post_id}",
                             'likesCount': post.get('likesCount', 0),
-                            'commentsCount': post.get('commentsCount', 0),
+                            'commentsCount': comment_count,
+                            'commentCount': comment_count,
                             'createdAt': post.get('createdAt', ''),
                             'categoryName': post.get('categoryName', ''),
+                            'groupId': group_id,
                         })
 
                 print(f"    Found {len(post_list)} posts ({len(posts)} total unique)")
@@ -1305,6 +1595,108 @@ async def scrape_posts_with_page(page, community: str, max_pages: int = 2) -> li
             await asyncio.sleep(5)
 
     return posts
+
+
+def _parse_comment(raw: dict, post_id: str, parent_id: str = "") -> dict:
+    post_data = raw.get('post', raw) or {}
+    meta = post_data.get('metadata', {}) or {}
+    user = post_data.get('user', {}) or {}
+    first_name = user.get('firstName', '')
+    last_name = user.get('lastName', '')
+    author_name = f"{first_name} {last_name}".strip() or user.get('name', '')
+    return {
+        'id': post_data.get('id', ''),
+        'postId': post_id,
+        'parentId': parent_id,
+        'content': meta.get('content', '') or post_data.get('content', '') or post_data.get('body', ''),
+        'authorName': author_name,
+        'authorId': user.get('id', ''),
+        'authorHandle': user.get('name', ''),
+        'createdAt': post_data.get('createdAt', ''),
+        'likes': meta.get('upvotes', 0),
+    }
+
+
+async def fetch_comments_for_post_with_page(page, post: dict) -> list:
+    """Fetch comments for one post through the authenticated browser context."""
+    post_id = str(post.get('id') or post.get('postId') or '')
+    group_id = post.get('groupId', '')
+    if not post_id or not group_id:
+        return []
+
+    all_comments = []
+    cursor = None
+    while True:
+        url = f"https://api2.skool.com/posts/{post_id}/comments?group-id={group_id}&limit=20"
+        if cursor:
+            url += f"&last={cursor}"
+
+        result = await page.evaluate(
+            """async (url) => {
+                const response = await fetch(url, {
+                    method: "GET",
+                    headers: { "accept": "application/json" },
+                    credentials: "include"
+                });
+                if (!response.ok) return { error: response.status };
+                return await response.json();
+            }""",
+            url,
+        )
+
+        if isinstance(result, dict) and result.get('error'):
+            print(f"    Comment fetch failed for {post_id}: HTTP {result.get('error')}")
+            break
+
+        post_tree = (result or {}).get('post_tree', {}) or {}
+        children = post_tree.get('children', []) or []
+        if not children:
+            break
+
+        for child in children:
+            comment = _parse_comment(child, post_id)
+            if comment.get('id'):
+                all_comments.append(comment)
+            for reply in child.get('children', []) or []:
+                reply_comment = _parse_comment(reply, post_id, parent_id=comment.get('id', ''))
+                if reply_comment.get('id'):
+                    all_comments.append(reply_comment)
+
+        next_cursor = (result or {}).get('last')
+        if not next_cursor or next_cursor == cursor:
+            break
+        cursor = next_cursor
+        await asyncio.sleep(COMMENT_PAGE_DELAY_SECONDS)
+
+    return all_comments
+
+
+async def fetch_comments_for_posts_with_page(page, posts: list) -> dict:
+    comments_by_post = {}
+    for post in posts:
+        post_id = str(post.get('id') or post.get('postId') or '')
+        if not post_id:
+            continue
+        comments = await fetch_comments_for_post_with_page(page, post)
+        comments_by_post[post_id] = {"post": post, "comments": comments}
+        print(f"    Comments for {post_id}: {len(comments)}")
+    return comments_by_post
+
+
+def update_comment_state(comment_state: dict, posts: list, comments_by_post: dict):
+    seen = {str(i) for i in comment_state.get("seen_ids", [])}
+    counts = comment_state.get("post_comment_counts", {}) or {}
+    for post in posts:
+        post_id = str(post.get('id') or post.get('postId') or '')
+        if post_id:
+            counts[post_id] = _post_comment_count(post)
+    for payload in comments_by_post.values():
+        for comment in payload.get("comments", []):
+            comment_id = str(comment.get("id") or "")
+            if comment_id:
+                seen.add(comment_id)
+    comment_state["seen_ids"] = list(seen)
+    comment_state["post_comment_counts"] = counts
 
 
 async def scrape_recent_posts(community: str, max_pages: int = 2,
@@ -1397,8 +1789,50 @@ def log_event(community: str, event_type: str, data: dict):
 # NOTIFICATIONS — formatted with clickable links
 # ============================================================================
 
+def send_ntfy_notification(title: str, body: str, notify_type: str = "info",
+                           tag: str = None, dry_run: bool = False) -> bool:
+    """Send a direct ntfy push when NTFY_URL is configured."""
+    if not NTFY_URL:
+        return False
+
+    priority = "high" if notify_type in {"warning", "failure"} else "default"
+    headers = {
+        "Title": title,
+        "Priority": priority,
+        "Tags": tag or "skool",
+    }
+    match = re.search(r"https?://\S+", body)
+    if match:
+        headers["Click"] = match.group(0).rstrip(").,")
+
+    if dry_run:
+        print(f"\n  [DRY RUN] ntfy notification ({notify_type}):")
+        print(f"    Title: {title}")
+        print(f"    Body: {body[:300]}...")
+        print(f"    URL: {NTFY_URL}")
+        return True
+
+    try:
+        resp = requests.post(
+            NTFY_URL,
+            data=body.encode("utf-8"),
+            headers=headers,
+            timeout=15,
+        )
+        if 200 <= resp.status_code < 300:
+            print(f"  ntfy sent: {title}")
+            return True
+        print(f"  ntfy failed ({resp.status_code}): {resp.text[:200]}")
+    except requests.RequestException as e:
+        print(f"  ntfy error: {e}")
+    return False
+
+
 def send_apprise_notification(title: str, body: str, notify_type: str = "info",
                                tag: str = None, dry_run: bool = False) -> bool:
+    if send_ntfy_notification(title, body, notify_type=notify_type, tag=tag, dry_run=dry_run):
+        return True
+
     if dry_run:
         print(f"\n  [DRY RUN] Notification ({notify_type}):")
         print(f"    Title: {title}")
@@ -1553,12 +1987,117 @@ def format_wins_notification(wins: list) -> tuple:
     return title, "\n".join(lines)
 
 
+def _find_cached_author_context(post: dict, enrichment_cache: dict) -> str:
+    author_name = (post.get("authorName") or "").strip().lower()
+    author_handle = (post.get("authorHandle") or post.get("author", {}).get("username") or "").strip().lower()
+    for handle, cached in (enrichment_cache or {}).items():
+        cached_name = (cached.get("name") or "").strip().lower()
+        if (author_handle and author_handle == str(handle).lower()) or (author_name and author_name == cached_name):
+            tier = cached.get("tier") or cached.get("icp_tier")
+            score = cached.get("icp_score")
+            if tier and score is not None:
+                return f"Tier {tier} / ICP {score}"
+            if tier:
+                return f"Tier {tier}"
+    return ""
+
+
+def format_intro_notification(intro_posts: list, enrichment_cache: dict | None = None) -> tuple:
+    count = len(intro_posts)
+    title = f"Skool: {count} new intro post{'s' if count != 1 else ''}"
+    lines = []
+    for post in intro_posts[:10]:
+        author = post.get("authorName") or "Unknown"
+        context = _find_cached_author_context(post, enrichment_cache or {})
+        header = f"{author}"
+        if context:
+            header += f" ({context})"
+        lines.append(header)
+        if post.get("title"):
+            lines.append(f'    "{post["title"][:120]}"')
+        excerpt = (post.get("content") or "").replace("\n", " ").strip()
+        if excerpt:
+            lines.append(f"    {excerpt[:220]}")
+        category = post.get("categoryName") or post.get("category") or ""
+        if category:
+            lines.append(f"    Category: {category}")
+        lines.append(f"    Post: {post.get('url') or post.get('postUrl', '')}")
+        lines.append("")
+    return title, "\n".join(lines)
+
+
+def format_all_new_posts_notification(posts: list) -> tuple:
+    count = len(posts)
+    title = f"Skool: {count} new post{'s' if count != 1 else ''}"
+    lines = []
+    limit = max(1, ALL_NEW_POSTS_NOTIFY_LIMIT)
+
+    for post in posts[:limit]:
+        author = (
+            post.get("authorName")
+            or post.get("author", {}).get("name")
+            or post.get("author", {}).get("username")
+            or "Unknown"
+        )
+        lines.append(author)
+
+        post_title = (post.get("title") or "").strip()
+        if post_title:
+            lines.append(f'    "{post_title[:140]}"')
+
+        category = post.get("categoryName") or post.get("category") or ""
+        if category:
+            lines.append(f"    Category: {category}")
+
+        excerpt = (post.get("content") or "").replace("\n", " ").strip()
+        if excerpt:
+            lines.append(f"    {excerpt[:220]}")
+
+        post_url = post.get("url") or post.get("postUrl") or ""
+        if post_url:
+            lines.append(f"    Post: {post_url}")
+        lines.append("")
+
+    overflow = count - limit
+    if overflow > 0:
+        lines.append(f"...and {overflow} more new posts.")
+
+    return title, "\n".join(lines)
+
+
+def format_real_estate_us_notification(members: list) -> tuple:
+    count = len(members)
+    title = f"Skool: {count} US real estate member{'s' if count != 1 else ''} joined"
+    lines = []
+    for member in members[:10]:
+        name = member.get("name") or member.get("handle") or "Unknown"
+        tier = member.get("tier")
+        score = member.get("icp_score")
+        header = name
+        if tier and score is not None:
+            header += f" (Tier {tier}, ICP {score})"
+        lines.append(header)
+        if member.get("location"):
+            lines.append(f"    Location: {member['location']}")
+        if member.get("real_estate_signal"):
+            lines.append(f"    Real estate signal: {member['real_estate_signal']}")
+        if member.get("us_signal"):
+            lines.append(f"    US signal: {member['us_signal']}")
+        bio = (member.get("bio") or "").replace("\n", " ").strip()
+        if bio:
+            lines.append(f"    {bio[:220]}")
+        lines.append(f"    Skool: {member.get('profileUrl', '')}")
+        lines.append("")
+    return title, "\n".join(lines)
+
+
 def format_mentions_notification(mentions: list) -> tuple:
     count = len(mentions)
     title = f"Skool: {count} meaningful mention{'s' if count != 1 else ''}"
     lines = []
     for m in mentions:
-        lines.append(f"[{m.get('type', 'mention')}] {m['author_name']}")
+        location = m.get("location", "post")
+        lines.append(f"[{m.get('type', 'mention')} / {location}] {m['author_name']}")
         if m.get('context'):
             lines.append(f'    "{m["context"][:150]}"')
         lines.append(f"    Post: {m.get('post_url', '')}")
@@ -1590,7 +2129,7 @@ def format_antigravity_notification(mentions: list) -> tuple:
 
 
 # ============================================================================
-# TEST MODE — fire all 5 notification types with realistic fake data
+# TEST MODE — fire all notification types with realistic fake data
 # ============================================================================
 
 def run_test_notifications(dry_run: bool = False):
@@ -1602,14 +2141,14 @@ def run_test_notifications(dry_run: bool = False):
            python skool_apprise_monitor.py --test --dry-run
     """
     print(f"\n{'='*60}")
-    print("TEST MODE — Sending all 5 notification types")
+    print("TEST MODE — Sending all notification types")
     print(f"{'='*60}")
 
     sent = 0
-    total = 5
+    total = 8
 
     # --- 1. New ICP Member (Tier A) ---
-    print("\n[1/5] New ICP Member (Tier A)")
+    print("\n[1/8] New ICP Member (Tier A)")
     test_member = {
         "name": "Sarah Mitchell",
         "handle": "sarah-mitchell-test",
@@ -1634,7 +2173,7 @@ def run_test_notifications(dry_run: bool = False):
         sent += 1
 
     # --- 2. ICP Churn (Tier A cancelled) ---
-    print("\n[2/5] ICP Churn (Tier A Cancellation)")
+    print("\n[2/8] ICP Churn (Tier A Cancellation)")
     test_churn = {
         "name": "Marcus Rivera",
         "handle": "marcus-rivera-test",
@@ -1658,7 +2197,7 @@ def run_test_notifications(dry_run: bool = False):
         sent += 1
 
     # --- 3. Financial Win ---
-    print("\n[3/5] Financial Win")
+    print("\n[3/8] Financial Win")
     test_wins = [{
         "money_pattern": "$15,000 deal",
         "author_name": "Jake Thompson",
@@ -1673,7 +2212,7 @@ def run_test_notifications(dry_run: bool = False):
         sent += 1
 
     # --- 4. Meaningful @florian Mention ---
-    print("\n[4/5] Meaningful @florian Mention")
+    print("\n[4/8] Meaningful @florian Mention")
     test_mentions = [{
         "type": "@mention",
         "author_name": "David Park",
@@ -1686,8 +2225,60 @@ def run_test_notifications(dry_run: bool = False):
     if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
         sent += 1
 
-    # --- 5. Anti-Gravity Brand Mention ---
-    print("\n[5/5] Anti-Gravity Brand Mention")
+    # --- 5. New Intro Post ---
+    print("\n[5/8] New Intro Post")
+    test_intro = [{
+        "authorName": "Angela Morris",
+        "title": "Excited to join",
+        "content": "I run a small operations consultancy in Texas and I am looking forward to learning more about AI systems.",
+        "categoryName": "Introductions",
+        "url": "https://www.skool.com/aiautomationsbyjack/test-intro-001",
+    }]
+    title, body = format_intro_notification(test_intro, {})
+    if send_apprise_notification(title, body, notify_type="info", tag="intro", dry_run=dry_run):
+        sent += 1
+
+    # --- 6. All New Posts ---
+    print("\n[6/8] All New Posts")
+    test_posts = [
+        {
+            "authorName": "Angela Morris",
+            "title": "Excited to join",
+            "content": "I run a small operations consultancy in Texas and I am looking forward to learning more about AI systems.",
+            "categoryName": "Introductions",
+            "postUrl": "https://www.skool.com/aiautomationsbyjack/test-intro-001",
+        },
+        {
+            "authorName": "Noah Patel",
+            "title": "Need feedback on my outbound workflow",
+            "content": "I am testing a new appointment booking automation and would love a second set of eyes.",
+            "categoryName": "General",
+            "postUrl": "https://www.skool.com/aiautomationsbyjack/test-post-002",
+        },
+    ]
+    title, body = format_all_new_posts_notification(test_posts)
+    if send_apprise_notification(title, body, notify_type="info", tag="new-post", dry_run=dry_run):
+        sent += 1
+
+    # --- 7. US Real Estate Member ---
+    print("\n[7/8] US Real Estate Member")
+    test_re_member = [{
+        "name": "Carlos Bennett",
+        "handle": "carlos-bennett-test",
+        "bio": "Real estate investor and property manager focused on multifamily deals.",
+        "location": "Austin, TX",
+        "profileUrl": "https://www.skool.com/@carlos-bennett-test",
+        "tier": "B",
+        "icp_score": 45,
+        "real_estate_signal": "real estate",
+        "us_signal": "TX",
+    }]
+    title, body = format_real_estate_us_notification(test_re_member)
+    if send_apprise_notification(title, body, notify_type="info", tag="real-estate", dry_run=dry_run):
+        sent += 1
+
+    # --- 8. Anti-Gravity Brand Mention ---
+    print("\n[8/8] Anti-Gravity Brand Mention")
     test_ag = [{
         "author_name": "Lisa Chen",
         "author_handle": "lisa-chen-test",
@@ -1727,7 +2318,8 @@ async def run_monitor(community: str, headless: bool = True,
 
     results = {
         "new_members": 0, "enriched": 0, "churned": 0,
-        "wins": 0, "mentions": 0, "antigravity": 0,
+        "wins": 0, "mentions": 0, "antigravity": 0, "intros": 0,
+        "real_estate_us": 0, "all_new_posts": 0,
         "notifications_sent": 0,
     }
 
@@ -1767,6 +2359,16 @@ async def run_monitor(community: str, headless: bool = True,
                         t = m.get("tier", "?")
                         tier_counts[t] = tier_counts.get(t, 0) + 1
                     print(f"  Tiers: {tier_counts}")
+
+                    real_estate_us_members = detect_real_estate_us_members(scored)
+                    if real_estate_us_members:
+                        results["real_estate_us"] = len(real_estate_us_members)
+                        title, body = format_real_estate_us_notification(real_estate_us_members)
+                        if send_apprise_notification(title, body, notify_type="info", tag="real-estate", dry_run=dry_run):
+                            results["notifications_sent"] += 1
+                        print(f"  US real estate member alerts: {len(real_estate_us_members)}")
+                        for m in real_estate_us_members:
+                            log_event(community, "real_estate_us_member", m)
 
                     # Enrich qualified members BEFORE notifying
                     for m in qualified:
@@ -1911,6 +2513,8 @@ async def run_monitor(community: str, headless: bool = True,
     if not members_only:
         print(f"\n[3/3] POST MONITORING")
         post_state = load_state("posts", community)
+        intro_state = load_state("intro_posts", community)
+        comment_state = load_state("comments", community)
 
         try:
             if session and session.is_alive:
@@ -1926,40 +2530,89 @@ async def run_monitor(community: str, headless: bool = True,
                 post_ids = [str(p.get("id", "")) for p in posts if p.get("id")]
                 add_to_state(post_state, post_ids)
                 save_state("posts", community, post_state)
+                intro_ids = [str(p.get("id", "")) for p in posts if p.get("id") and is_intro_post(p)]
+                add_to_state(intro_state, intro_ids)
+                save_state("intro_posts", community, intro_state)
+                comment_candidates = select_posts_for_comment_scan(posts, posts, comment_state)
+                comments_by_post = {}
+                if comment_candidates:
+                    active_page = session.page if session and session.is_alive else None
+                    if active_page:
+                        comments_by_post = await fetch_comments_for_posts_with_page(active_page, comment_candidates)
+                update_comment_state(comment_state, posts, comments_by_post)
+                save_state("comments", community, comment_state)
                 print(f"  Initialized state with {len(post_ids)} posts.")
-            elif new_posts:
-                # Financial wins
-                wins = detect_wins(new_posts)
-                if wins:
-                    results["wins"] = len(wins)
-                    title, body = format_wins_notification(wins)
-                    if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+            else:
+                intro_posts = [p for p in posts if is_intro_post(p)]
+                new_intro_posts = filter_new_ids(intro_posts, intro_state, id_key="id")
+                if new_intro_posts:
+                    results["intros"] = len(new_intro_posts)
+                    title, body = format_intro_notification(new_intro_posts, enrichment_cache)
+                    if send_apprise_notification(title, body, notify_type="info", tag="intro", dry_run=dry_run):
                         results["notifications_sent"] += 1
-                    print(f"  Financial wins: {len(wins)}")
-                    for w in wins:
-                        log_event(community, "win", w)
+                    print(f"  New intro posts: {len(new_intro_posts)}")
+                    for p in new_intro_posts:
+                        log_event(community, "intro_post", p)
 
-                # Anti-gravity / brand mentions
-                ag_mentions = detect_antigravity_mentions(new_posts)
-                if ag_mentions:
-                    results["antigravity"] = len(ag_mentions)
-                    title, body = format_antigravity_notification(ag_mentions)
-                    if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
-                        results["notifications_sent"] += 1
-                    print(f"  Anti-gravity mentions: {len(ag_mentions)}")
-                    for ag in ag_mentions:
-                        log_event(community, "antigravity", ag)
+                if new_posts:
+                    if NOTIFY_ALL_NEW_POSTS:
+                        results["all_new_posts"] = len(new_posts)
+                        title, body = format_all_new_posts_notification(new_posts)
+                        if send_apprise_notification(title, body, notify_type="info", tag="new-post", dry_run=dry_run):
+                            results["notifications_sent"] += 1
+                        print(f"  All-new-post alerts: {len(new_posts)}")
+                        for p in new_posts:
+                            log_event(community, "new_post", p)
 
-                # @florian mentions — only notify if meaningful
-                mentions = detect_mentions(new_posts)
+                    # Financial wins
+                    wins = detect_wins(new_posts)
+                    if wins:
+                        results["wins"] = len(wins)
+                        title, body = format_wins_notification(wins)
+                        if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+                            results["notifications_sent"] += 1
+                        print(f"  Financial wins: {len(wins)}")
+                        for w in wins:
+                            log_event(community, "win", w)
+
+                    # Anti-gravity / brand mentions
+                    ag_mentions = detect_antigravity_mentions(new_posts)
+                    if ag_mentions:
+                        results["antigravity"] = len(ag_mentions)
+                        title, body = format_antigravity_notification(ag_mentions)
+                        if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+                            results["notifications_sent"] += 1
+                        print(f"  Anti-gravity mentions: {len(ag_mentions)}")
+                        for ag in ag_mentions:
+                            log_event(community, "antigravity", ag)
+
+                    # @florian mentions in new posts
+                    post_mentions = detect_mentions(new_posts)
+                    if post_mentions:
+                        print(f"  Post mentions found: {len(post_mentions)}")
+                else:
+                    post_mentions = []
+
+                comment_candidates = select_posts_for_comment_scan(posts, new_posts, comment_state)
+                comments_by_post = {}
+                if comment_candidates:
+                    active_page = session.page if session and session.is_alive else None
+                    if active_page:
+                        print(f"  Scanning comments on {len(comment_candidates)} post(s)")
+                        comments_by_post = await fetch_comments_for_posts_with_page(active_page, comment_candidates)
+                    else:
+                        print("  Comment scan skipped in standalone post scrape without active browser page")
+
+                comment_mentions = detect_comment_mentions(comments_by_post, comment_state)
+                mentions = post_mentions + comment_mentions
                 if mentions:
                     meaningful = [m for m in mentions if m.get("meaningful")]
                     noise = [m for m in mentions if not m.get("meaningful")]
 
                     if meaningful:
-                        results["mentions"] = len(meaningful)
+                        results["mentions"] += len(meaningful)
                         title, body = format_mentions_notification(meaningful)
-                        if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+                        if send_apprise_notification(title, body, notify_type="info", tag="mention", dry_run=dry_run):
                             results["notifications_sent"] += 1
                         print(f"  Meaningful mentions: {len(meaningful)}")
 
@@ -1971,12 +2624,18 @@ async def run_monitor(community: str, headless: bool = True,
                         log_event(community, "mention", m)
 
                 # Vectorize new posts to Supabase (non-blocking, graceful degradation)
-                vectorize_new_posts(new_posts, community)
+                if new_posts:
+                    vectorize_new_posts(new_posts, community)
 
                 post_ids = [str(p.get("id", "")) for p in posts if p.get("id")]
                 add_to_state(post_state, post_ids)
+                intro_ids = [str(p.get("id", "")) for p in intro_posts if p.get("id")]
+                add_to_state(intro_state, intro_ids)
+                update_comment_state(comment_state, posts, comments_by_post)
 
             save_state("posts", community, post_state)
+            save_state("intro_posts", community, intro_state)
+            save_state("comments", community, comment_state)
 
         except Exception as e:
             print(f"  ERROR in post monitoring: {e}")
@@ -1987,7 +2646,10 @@ async def run_monitor(community: str, headless: bool = True,
     print(f"\n{'='*60}")
     print(f"RESULTS:")
     print(f"  New ICP members:    {results['new_members']} (enriched: {results['enriched']})")
+    print(f"  US real estate:     {results['real_estate_us']}")
     print(f"  Churn (ICP):        {results['churned']}")
+    print(f"  Intro posts:        {results['intros']}")
+    print(f"  All new posts:      {results['all_new_posts']}")
     print(f"  Financial wins:     {results['wins']}")
     print(f"  Mentions:           {results['mentions']}")
     print(f"  Anti-gravity:       {results['antigravity']}")
