@@ -82,6 +82,7 @@ NTFY_URL = os.getenv("NTFY_URL", os.getenv("FLORIAN_NTFY_URL", "")).strip()
 COMMENT_PAGE_DELAY_SECONDS = float(os.getenv("COMMENT_PAGE_DELAY_SECONDS", "1"))
 COMMENT_SCAN_POST_LIMIT = int(os.getenv("COMMENT_SCAN_POST_LIMIT", "20"))
 ALL_NEW_POSTS_NOTIFY_LIMIT = int(os.getenv("ALL_NEW_POSTS_NOTIFY_LIMIT", "10"))
+MENTION_PREVIEW_CHARS = int(os.getenv("MENTION_PREVIEW_CHARS", "30"))
 
 
 def _derive_ntfy_topic_url(base_url: str, topic: str) -> str:
@@ -929,6 +930,18 @@ def _combined_text(item: dict) -> str:
     return f"{title}\n{content}".strip()
 
 
+def _body_text(item: dict) -> str:
+    """Return only the actual post/comment body text for notification previews."""
+    return (item.get('content', '') or item.get('body', '') or item.get('text', '') or '').strip()
+
+
+def _short_preview(text: str, limit: int = MENTION_PREVIEW_CHARS) -> str:
+    cleaned = re.sub(r'\s+', ' ', text or '').strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rstrip() + "..."
+
+
 def _post_comment_count(post: dict) -> int:
     try:
         return int(post.get('commentsCount', post.get('commentCount', 0)) or 0)
@@ -999,6 +1012,7 @@ def detect_mentions_in_source(source: dict, location: str = "post",
             context = context + '...'
 
         post = parent_post or source
+        body_text = _body_text(source) or content
         mentions.append({
             'post_id': post.get('id') or post.get('postId') or source.get('postId'),
             'comment_id': source.get('id') if location == "comment" else '',
@@ -1011,6 +1025,7 @@ def detect_mentions_in_source(source: dict, location: str = "post",
             'post_title': post.get('title', ''),
             'post_url': post.get('url') or post.get('postUrl', ''),
             'context': context,
+            'preview': _short_preview(body_text),
             'likes_count': post.get('likesCount', post.get('likes', 0)),
             'comments_count': _post_comment_count(post),
         })
@@ -2174,8 +2189,11 @@ def format_mentions_notification(mentions: list) -> tuple:
     for m in mentions:
         location = m.get("location", "post")
         lines.append(f"[{m.get('type', 'mention')} / {location}] {m['author_name']}")
-        if m.get('context'):
-            lines.append(f'    "{m["context"][:150]}"')
+        if m.get("post_title"):
+            lines.append(f'    Post title: "{m["post_title"][:90]}"')
+        preview = m.get("preview") or _short_preview(m.get("context", ""))
+        if preview:
+            lines.append(f'    Preview: "{preview}"')
         lines.append(f"    Post: {m.get('post_url', '')}")
         lines.append("")
     return title, "\n".join(lines)
@@ -2309,7 +2327,9 @@ def run_test_notifications(dry_run: bool = False):
         "type": "@mention",
         "author_name": "David Park",
         "author_handle": "david-park-test",
+        "post_title": "Question about appointment booking agents",
         "context": "...has anyone tried building a GoHighLevel integration with AI agents? @florian I saw your post about automation workflows — would love to hear how you approached the appointment booking pipeline...",
+        "preview": "has anyone tried building a GoH...",
         "post_url": "https://www.skool.com/aiautomationsbyjack/test-mention-456",
         "meaningful": True,
     }]
