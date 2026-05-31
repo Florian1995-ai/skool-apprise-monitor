@@ -81,8 +81,41 @@ APPRISE_URL = os.getenv("APPRISE_URL", "https://notify.florianrolke.com")
 NTFY_URL = os.getenv("NTFY_URL", os.getenv("FLORIAN_NTFY_URL", "")).strip()
 COMMENT_PAGE_DELAY_SECONDS = float(os.getenv("COMMENT_PAGE_DELAY_SECONDS", "1"))
 COMMENT_SCAN_POST_LIMIT = int(os.getenv("COMMENT_SCAN_POST_LIMIT", "20"))
-NOTIFY_ALL_NEW_POSTS = os.getenv("NOTIFY_ALL_NEW_POSTS", "false").strip().lower() in {"1", "true", "yes", "on"}
 ALL_NEW_POSTS_NOTIFY_LIMIT = int(os.getenv("ALL_NEW_POSTS_NOTIFY_LIMIT", "10"))
+
+
+def _derive_ntfy_topic_url(base_url: str, topic: str) -> str:
+    """Derive a sibling ntfy topic URL from the primary topic URL."""
+    if not base_url:
+        return ""
+    base = base_url.rstrip("/")
+    if "/" not in base:
+        return ""
+    return f"{base.rsplit('/', 1)[0]}/{topic}"
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Default alert policy: member joins, intros, and Florian mentions only.
+ALERT_MEMBER_JOINS = _env_bool("ALERT_MEMBER_JOINS", True)
+ALERT_INTRO_POSTS = _env_bool("ALERT_INTRO_POSTS", True)
+ALERT_MENTIONS = _env_bool("ALERT_MENTIONS", True)
+NOTIFY_ALL_NEW_POSTS = _env_bool("NOTIFY_ALL_NEW_POSTS", False)
+ALERT_ICP_MEMBERS = _env_bool("ALERT_ICP_MEMBERS", False)
+ALERT_CHURN = _env_bool("ALERT_CHURN", False)
+ALERT_WINS = _env_bool("ALERT_WINS", False)
+ALERT_ANTIGRAVITY = _env_bool("ALERT_ANTIGRAVITY", False)
+ALERT_REAL_ESTATE_US = _env_bool("ALERT_REAL_ESTATE_US", False)
+ALERT_DAILY_DIGEST = _env_bool("ALERT_DAILY_DIGEST", False)
+NTFY_ALL_POSTS_URL = (
+    os.getenv("NTFY_ALL_POSTS_URL", "").strip()
+    or _derive_ntfy_topic_url(NTFY_URL, "skool-all-posts")
+)
 
 # API keys for enrichment
 PERPLEXITY_KEY = os.getenv("PERPLEXITY_API_KEY", "")
@@ -1790,9 +1823,11 @@ def log_event(community: str, event_type: str, data: dict):
 # ============================================================================
 
 def send_ntfy_notification(title: str, body: str, notify_type: str = "info",
-                           tag: str = None, dry_run: bool = False) -> bool:
-    """Send a direct ntfy push when NTFY_URL is configured."""
-    if not NTFY_URL:
+                           tag: str = None, dry_run: bool = False,
+                           ntfy_url: str = None) -> bool:
+    """Send a direct ntfy push when an ntfy topic URL is configured."""
+    target_url = (NTFY_URL if ntfy_url is None else ntfy_url).strip()
+    if not target_url:
         return False
 
     priority = "high" if notify_type in {"warning", "failure"} else "default"
@@ -1809,12 +1844,12 @@ def send_ntfy_notification(title: str, body: str, notify_type: str = "info",
         print(f"\n  [DRY RUN] ntfy notification ({notify_type}):")
         print(f"    Title: {title}")
         print(f"    Body: {body[:300]}...")
-        print(f"    URL: {NTFY_URL}")
+        print(f"    URL: {target_url}")
         return True
 
     try:
         resp = requests.post(
-            NTFY_URL,
+            target_url,
             data=body.encode("utf-8"),
             headers=headers,
             timeout=15,
@@ -1829,9 +1864,22 @@ def send_ntfy_notification(title: str, body: str, notify_type: str = "info",
 
 
 def send_apprise_notification(title: str, body: str, notify_type: str = "info",
-                               tag: str = None, dry_run: bool = False) -> bool:
-    if send_ntfy_notification(title, body, notify_type=notify_type, tag=tag, dry_run=dry_run):
+                               tag: str = None, dry_run: bool = False,
+                               ntfy_url: str = None,
+                               fallback_to_apprise: bool = True) -> bool:
+    if send_ntfy_notification(
+        title,
+        body,
+        notify_type=notify_type,
+        tag=tag,
+        dry_run=dry_run,
+        ntfy_url=ntfy_url,
+    ):
         return True
+
+    if ntfy_url is not None and not fallback_to_apprise:
+        print("  WARNING: ntfy topic unavailable and Apprise fallback disabled")
+        return False
 
     if dry_run:
         print(f"\n  [DRY RUN] Notification ({notify_type}):")
@@ -1919,6 +1967,34 @@ def format_member_notification(member: dict, enrichment: dict) -> tuple:
 
     body = "\n".join(lines)
     return title, body
+
+
+def format_member_join_notification(members: list) -> tuple:
+    """Format newly joined Skool members without enrichment or ICP scoring."""
+    count = len(members)
+    title = f"Skool: {count} new member{'s' if count != 1 else ''} joined"
+    lines = []
+    limit = 10
+
+    for member in members[:limit]:
+        name = member.get("name") or member.get("handle") or "Unknown"
+        handle = member.get("handle", "")
+        lines.append(name)
+        if member.get("location"):
+            lines.append(f"    Location: {member['location']}")
+        bio = (member.get("bio") or "").replace("\n", " ").strip()
+        if bio:
+            lines.append(f"    {bio[:220]}")
+        profile_url = member.get("profileUrl") or (f"https://www.skool.com/@{handle}" if handle else "")
+        if profile_url:
+            lines.append(f"    Skool: {profile_url}")
+        lines.append("")
+
+    overflow = count - limit
+    if overflow > 0:
+        lines.append(f"...and {overflow} more new members.")
+
+    return title, "\n".join(lines)
 
 
 def format_churn_notification(member_data: dict) -> tuple:
@@ -2145,10 +2221,20 @@ def run_test_notifications(dry_run: bool = False):
     print(f"{'='*60}")
 
     sent = 0
-    total = 8
+    total = sum([
+        ALERT_MEMBER_JOINS,
+        ALERT_ICP_MEMBERS,
+        ALERT_CHURN,
+        ALERT_WINS,
+        ALERT_MENTIONS,
+        ALERT_INTRO_POSTS,
+        NOTIFY_ALL_NEW_POSTS,
+        ALERT_REAL_ESTATE_US,
+        ALERT_ANTIGRAVITY,
+    ])
 
-    # --- 1. New ICP Member (Tier A) ---
-    print("\n[1/8] New ICP Member (Tier A)")
+    # --- 1. New Member Join ---
+    print("\n[1/9] New Member Join")
     test_member = {
         "name": "Sarah Mitchell",
         "handle": "sarah-mitchell-test",
@@ -2158,6 +2244,12 @@ def run_test_notifications(dry_run: bool = False):
         "icp_score": 72,
         "match_reasons": ["Position: ceo", "Industry: local business", "Pain: scale"],
     }
+    title, body = format_member_join_notification([test_member])
+    if ALERT_MEMBER_JOINS and send_apprise_notification(title, body, notify_type="info", tag="member", dry_run=dry_run):
+        sent += 1
+
+    # --- 2. New ICP Member (Tier A) ---
+    print("\n[2/9] New ICP Member (Tier A)")
     test_enrichment = {
         "company": "GrowthStack Digital",
         "company_description": "AI-powered marketing automation for local service businesses. Specializes in GoHighLevel implementations.",
@@ -2169,11 +2261,11 @@ def run_test_notifications(dry_run: bool = False):
         "website": "https://growthstackdigital.com",
     }
     title, body = format_member_notification(test_member, test_enrichment)
-    if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+    if ALERT_ICP_MEMBERS and send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
         sent += 1
 
-    # --- 2. ICP Churn (Tier A cancelled) ---
-    print("\n[2/8] ICP Churn (Tier A Cancellation)")
+    # --- 3. ICP Churn (Tier A cancelled) ---
+    print("\n[3/9] ICP Churn (Tier A Cancellation)")
     test_churn = {
         "name": "Marcus Rivera",
         "handle": "marcus-rivera-test",
@@ -2193,11 +2285,11 @@ def run_test_notifications(dry_run: bool = False):
         },
     }
     title, body = format_churn_notification(test_churn)
-    if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+    if ALERT_CHURN and send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
         sent += 1
 
-    # --- 3. Financial Win ---
-    print("\n[3/8] Financial Win")
+    # --- 4. Financial Win ---
+    print("\n[4/9] Financial Win")
     test_wins = [{
         "money_pattern": "$15,000 deal",
         "author_name": "Jake Thompson",
@@ -2208,11 +2300,11 @@ def run_test_notifications(dry_run: bool = False):
         "comments_count": 23,
     }]
     title, body = format_wins_notification(test_wins)
-    if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+    if ALERT_WINS and send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
         sent += 1
 
-    # --- 4. Meaningful @florian Mention ---
-    print("\n[4/8] Meaningful @florian Mention")
+    # --- 5. Meaningful @florian Mention ---
+    print("\n[5/9] Meaningful @florian Mention")
     test_mentions = [{
         "type": "@mention",
         "author_name": "David Park",
@@ -2222,11 +2314,11 @@ def run_test_notifications(dry_run: bool = False):
         "meaningful": True,
     }]
     title, body = format_mentions_notification(test_mentions)
-    if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+    if ALERT_MENTIONS and send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
         sent += 1
 
-    # --- 5. New Intro Post ---
-    print("\n[5/8] New Intro Post")
+    # --- 6. New Intro Post ---
+    print("\n[6/9] New Intro Post")
     test_intro = [{
         "authorName": "Angela Morris",
         "title": "Excited to join",
@@ -2235,11 +2327,11 @@ def run_test_notifications(dry_run: bool = False):
         "url": "https://www.skool.com/aiautomationsbyjack/test-intro-001",
     }]
     title, body = format_intro_notification(test_intro, {})
-    if send_apprise_notification(title, body, notify_type="info", tag="intro", dry_run=dry_run):
+    if ALERT_INTRO_POSTS and send_apprise_notification(title, body, notify_type="info", tag="intro", dry_run=dry_run):
         sent += 1
 
-    # --- 6. All New Posts ---
-    print("\n[6/8] All New Posts")
+    # --- 7. All New Posts ---
+    print("\n[7/9] All New Posts")
     test_posts = [
         {
             "authorName": "Angela Morris",
@@ -2257,11 +2349,19 @@ def run_test_notifications(dry_run: bool = False):
         },
     ]
     title, body = format_all_new_posts_notification(test_posts)
-    if send_apprise_notification(title, body, notify_type="info", tag="new-post", dry_run=dry_run):
+    if NOTIFY_ALL_NEW_POSTS and send_apprise_notification(
+        title,
+        body,
+        notify_type="info",
+        tag="new-post",
+        dry_run=dry_run,
+        ntfy_url=NTFY_ALL_POSTS_URL,
+        fallback_to_apprise=False,
+    ):
         sent += 1
 
-    # --- 7. US Real Estate Member ---
-    print("\n[7/8] US Real Estate Member")
+    # --- 8. US Real Estate Member ---
+    print("\n[8/9] US Real Estate Member")
     test_re_member = [{
         "name": "Carlos Bennett",
         "handle": "carlos-bennett-test",
@@ -2274,11 +2374,11 @@ def run_test_notifications(dry_run: bool = False):
         "us_signal": "TX",
     }]
     title, body = format_real_estate_us_notification(test_re_member)
-    if send_apprise_notification(title, body, notify_type="info", tag="real-estate", dry_run=dry_run):
+    if ALERT_REAL_ESTATE_US and send_apprise_notification(title, body, notify_type="info", tag="real-estate", dry_run=dry_run):
         sent += 1
 
-    # --- 8. Anti-Gravity Brand Mention ---
-    print("\n[8/8] Anti-Gravity Brand Mention")
+    # --- 9. Anti-Gravity Brand Mention ---
+    print("\n[9/9] Anti-Gravity Brand Mention")
     test_ag = [{
         "author_name": "Lisa Chen",
         "author_handle": "lisa-chen-test",
@@ -2287,7 +2387,7 @@ def run_test_notifications(dry_run: bool = False):
         "post_url": "https://www.skool.com/aiautomationsbyjack/test-ag-789",
     }]
     title, body = format_antigravity_notification(test_ag)
-    if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+    if ALERT_ANTIGRAVITY and send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
         sent += 1
 
     print(f"\n{'='*60}")
@@ -2317,7 +2417,7 @@ async def run_monitor(community: str, headless: bool = True,
     print(f"{'='*60}")
 
     results = {
-        "new_members": 0, "enriched": 0, "churned": 0,
+        "member_joins": 0, "new_members": 0, "enriched": 0, "churned": 0,
         "wins": 0, "mentions": 0, "antigravity": 0, "intros": 0,
         "real_estate_us": 0, "all_new_posts": 0,
         "notifications_sent": 0,
@@ -2360,52 +2460,74 @@ async def run_monitor(community: str, headless: bool = True,
                         tier_counts[t] = tier_counts.get(t, 0) + 1
                     print(f"  Tiers: {tier_counts}")
 
+                    results["member_joins"] = len(scored)
+                    if ALERT_MEMBER_JOINS:
+                        title, body = format_member_join_notification(scored)
+                        if send_apprise_notification(title, body, notify_type="info", tag="member", dry_run=dry_run):
+                            results["notifications_sent"] += 1
+                        print(f"  Member join alerts: {len(scored)}")
+                    else:
+                        print(f"  Member join alerts disabled: {len(scored)} new member(s)")
+                    for m in scored:
+                        log_event(community, "member_join", {
+                            "handle": m.get("handle", ""),
+                            "name": m.get("name", ""),
+                            "profileUrl": m.get("profileUrl", ""),
+                            "joinedAt": m.get("joinedAt", ""),
+                        })
+
                     real_estate_us_members = detect_real_estate_us_members(scored)
                     if real_estate_us_members:
                         results["real_estate_us"] = len(real_estate_us_members)
-                        title, body = format_real_estate_us_notification(real_estate_us_members)
-                        if send_apprise_notification(title, body, notify_type="info", tag="real-estate", dry_run=dry_run):
-                            results["notifications_sent"] += 1
-                        print(f"  US real estate member alerts: {len(real_estate_us_members)}")
+                        if ALERT_REAL_ESTATE_US:
+                            title, body = format_real_estate_us_notification(real_estate_us_members)
+                            if send_apprise_notification(title, body, notify_type="info", tag="real-estate", dry_run=dry_run):
+                                results["notifications_sent"] += 1
+                            print(f"  US real estate member alerts: {len(real_estate_us_members)}")
+                        else:
+                            print(f"  US real estate detected, alert disabled: {len(real_estate_us_members)}")
                         for m in real_estate_us_members:
                             log_event(community, "real_estate_us_member", m)
 
-                    # Enrich qualified members BEFORE notifying
-                    for m in qualified:
-                        handle = m["handle"].lower()
-                        enrichment = enrich_member(m)
-                        results["enriched"] += 1
+                    if ALERT_ICP_MEMBERS:
+                        # Enrich qualified members BEFORE notifying
+                        for m in qualified:
+                            handle = m["handle"].lower()
+                            enrichment = enrich_member(m)
+                            results["enriched"] += 1
 
-                        # Re-score with enrichment data for better accuracy
-                        m = quick_score_member(m, enrichment)
+                            # Re-score with enrichment data for better accuracy
+                            m = quick_score_member(m, enrichment)
 
-                        # Cache enrichment data (for churn detection + digest)
-                        enrichment_cache[handle] = {
-                            "name": m.get("name", ""),
-                            "handle": handle,
-                            "tier": m.get("tier", "D"),
-                            "icp_score": m.get("icp_score", 0),
-                            "match_reasons": m.get("match_reasons", []),
-                            "enrichment": enrichment,
-                            "cached_at": datetime.now(timezone.utc).isoformat(),
-                        }
-
-                        # Only notify if still qualified after re-scoring with enrichment
-                        if m.get("tier") in ("A", "B"):
-                            results["new_members"] += 1
-                            title, body = format_member_notification(m, enrichment)
-                            if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
-                                results["notifications_sent"] += 1
-
-                            # Log event for daily digest
-                            log_event(community, "new_member", {
-                                "handle": handle,
+                            # Cache enrichment data (for churn detection + digest)
+                            enrichment_cache[handle] = {
                                 "name": m.get("name", ""),
-                                "tier": m.get("tier"),
-                                "icp_score": m.get("icp_score"),
+                                "handle": handle,
+                                "tier": m.get("tier", "D"),
+                                "icp_score": m.get("icp_score", 0),
                                 "match_reasons": m.get("match_reasons", []),
                                 "enrichment": enrichment,
-                            })
+                                "cached_at": datetime.now(timezone.utc).isoformat(),
+                            }
+
+                            # Only notify if still qualified after re-scoring with enrichment
+                            if m.get("tier") in ("A", "B"):
+                                results["new_members"] += 1
+                                title, body = format_member_notification(m, enrichment)
+                                if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+                                    results["notifications_sent"] += 1
+
+                                # Log event for daily digest
+                                log_event(community, "new_member", {
+                                    "handle": handle,
+                                    "name": m.get("name", ""),
+                                    "tier": m.get("tier"),
+                                    "icp_score": m.get("icp_score"),
+                                    "match_reasons": m.get("match_reasons", []),
+                                    "enrichment": enrichment,
+                                })
+                    elif qualified:
+                        print(f"  ICP alerts disabled, skipped enrichment for {len(qualified)} qualified member(s)")
 
                     # Also cache basic data for non-qualified members (for churn tracking)
                     for m in scored:
@@ -2456,8 +2578,14 @@ async def run_monitor(community: str, headless: bool = True,
                 if new_cancellations:
                     print(f"  NEW paid cancellations to evaluate: {len(new_cancellations)}")
                     notified = 0
+                    if not ALERT_CHURN:
+                        print(f"  Churn alerts disabled; marking {len(new_cancellations)} cancellation(s) seen")
 
                     for cancel in new_cancellations:
+                        if not ALERT_CHURN:
+                            log_event(community, "cancellation", cancel)
+                            continue
+
                         handle = cancel["handle"]
 
                         # Enrich cancelling member (Perplexity + Tavily LinkedIn)
@@ -2547,10 +2675,13 @@ async def run_monitor(community: str, headless: bool = True,
                 new_intro_posts = filter_new_ids(intro_posts, intro_state, id_key="id")
                 if new_intro_posts:
                     results["intros"] = len(new_intro_posts)
-                    title, body = format_intro_notification(new_intro_posts, enrichment_cache)
-                    if send_apprise_notification(title, body, notify_type="info", tag="intro", dry_run=dry_run):
-                        results["notifications_sent"] += 1
-                    print(f"  New intro posts: {len(new_intro_posts)}")
+                    if ALERT_INTRO_POSTS:
+                        title, body = format_intro_notification(new_intro_posts, enrichment_cache)
+                        if send_apprise_notification(title, body, notify_type="info", tag="intro", dry_run=dry_run):
+                            results["notifications_sent"] += 1
+                        print(f"  New intro posts: {len(new_intro_posts)}")
+                    else:
+                        print(f"  Intro post alerts disabled: {len(new_intro_posts)}")
                     for p in new_intro_posts:
                         log_event(community, "intro_post", p)
 
@@ -2558,36 +2689,46 @@ async def run_monitor(community: str, headless: bool = True,
                     if NOTIFY_ALL_NEW_POSTS:
                         results["all_new_posts"] = len(new_posts)
                         title, body = format_all_new_posts_notification(new_posts)
-                        if send_apprise_notification(title, body, notify_type="info", tag="new-post", dry_run=dry_run):
+                        if send_apprise_notification(
+                            title,
+                            body,
+                            notify_type="info",
+                            tag="new-post",
+                            dry_run=dry_run,
+                            ntfy_url=NTFY_ALL_POSTS_URL,
+                            fallback_to_apprise=False,
+                        ):
                             results["notifications_sent"] += 1
                         print(f"  All-new-post alerts: {len(new_posts)}")
                         for p in new_posts:
                             log_event(community, "new_post", p)
 
-                    # Financial wins
-                    wins = detect_wins(new_posts)
-                    if wins:
-                        results["wins"] = len(wins)
-                        title, body = format_wins_notification(wins)
-                        if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
-                            results["notifications_sent"] += 1
-                        print(f"  Financial wins: {len(wins)}")
-                        for w in wins:
-                            log_event(community, "win", w)
+                    if ALERT_WINS:
+                        # Financial wins
+                        wins = detect_wins(new_posts)
+                        if wins:
+                            results["wins"] = len(wins)
+                            title, body = format_wins_notification(wins)
+                            if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+                                results["notifications_sent"] += 1
+                            print(f"  Financial wins: {len(wins)}")
+                            for w in wins:
+                                log_event(community, "win", w)
 
-                    # Anti-gravity / brand mentions
-                    ag_mentions = detect_antigravity_mentions(new_posts)
-                    if ag_mentions:
-                        results["antigravity"] = len(ag_mentions)
-                        title, body = format_antigravity_notification(ag_mentions)
-                        if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
-                            results["notifications_sent"] += 1
-                        print(f"  Anti-gravity mentions: {len(ag_mentions)}")
-                        for ag in ag_mentions:
-                            log_event(community, "antigravity", ag)
+                    if ALERT_ANTIGRAVITY:
+                        # Anti-gravity / brand mentions
+                        ag_mentions = detect_antigravity_mentions(new_posts)
+                        if ag_mentions:
+                            results["antigravity"] = len(ag_mentions)
+                            title, body = format_antigravity_notification(ag_mentions)
+                            if send_apprise_notification(title, body, notify_type="info", dry_run=dry_run):
+                                results["notifications_sent"] += 1
+                            print(f"  Anti-gravity mentions: {len(ag_mentions)}")
+                            for ag in ag_mentions:
+                                log_event(community, "antigravity", ag)
 
                     # @florian mentions in new posts
-                    post_mentions = detect_mentions(new_posts)
+                    post_mentions = detect_mentions(new_posts) if ALERT_MENTIONS else []
                     if post_mentions:
                         print(f"  Post mentions found: {len(post_mentions)}")
                 else:
@@ -2603,7 +2744,7 @@ async def run_monitor(community: str, headless: bool = True,
                     else:
                         print("  Comment scan skipped in standalone post scrape without active browser page")
 
-                comment_mentions = detect_comment_mentions(comments_by_post, comment_state)
+                comment_mentions = detect_comment_mentions(comments_by_post, comment_state) if ALERT_MENTIONS else []
                 mentions = post_mentions + comment_mentions
                 if mentions:
                     meaningful = [m for m in mentions if m.get("meaningful")]
@@ -2645,6 +2786,7 @@ async def run_monitor(community: str, headless: bool = True,
     # --- SUMMARY ---
     print(f"\n{'='*60}")
     print(f"RESULTS:")
+    print(f"  Member joins:       {results['member_joins']}")
     print(f"  New ICP members:    {results['new_members']} (enriched: {results['enriched']})")
     print(f"  US real estate:     {results['real_estate_us']}")
     print(f"  Churn (ICP):        {results['churned']}")
@@ -2784,8 +2926,9 @@ async def run_daemon(community: str, interval: int = 180, headless: bool = True,
                 await asyncio.sleep(10)
                 await session.start()
 
-            # Check if it's time for the daily digest (9:30pm EST)
-            _check_and_run_digest(community, dry_run=dry_run)
+            # Check if it's time for the daily digest (disabled by default)
+            if ALERT_DAILY_DIGEST:
+                _check_and_run_digest(community, dry_run=dry_run)
 
             await session.maybe_restart()
 
